@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-简易 Dota 2 回放 GUI（初版）
+简易 Dota 2 回放 GUI（浏览器版，初版）
 
 功能：
 1) 显示英雄在地图上的位置
@@ -12,35 +12,205 @@
 from __future__ import annotations
 
 import argparse
-import bisect
 import bz2
-from dataclasses import dataclass
+import json
+import webbrowser
 from pathlib import Path
 from typing import Any
-import tkinter as tk
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import gem
 
 
-@dataclass
-class HeroState:
-    player_id: int
-    hero_name: str
-    team: int
-    x: float
-    y: float
+HTML_TEMPLATE = """<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Dota2 回放英雄位置（简易版）</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 0; background: #0f1116; color: #e6e6e6; }
+    .wrap { max-width: 1100px; margin: 0 auto; padding: 14px; }
+    .meta { margin-bottom: 8px; font-size: 14px; line-height: 1.5; }
+    .controls { display: flex; gap: 12px; align-items: center; margin: 10px 0 14px; }
+    button { background: #2d6cdf; color: white; border: none; border-radius: 4px; padding: 8px 14px; cursor: pointer; }
+    button:hover { background: #3a77e7; }
+    input[type=range] { flex: 1; }
+    canvas { width: 100%; height: 760px; background: #111; border: 1px solid #444; border-radius: 6px; }
+    .legend { margin-top: 8px; font-size: 13px; color: #b5b5b5; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="meta" id="fileLine"></div>
+    <div class="meta" id="tickLine"></div>
+    <div class="controls">
+      <button id="playBtn">播放</button>
+      <input id="slider" type="range" min="0" max="1" step="1" value="0" />
+    </div>
+    <canvas id="mapCanvas" width="1050" height="760"></canvas>
+    <div class="legend">绿色：天辉（team=2） | 红色：夜魇（team=3）</div>
+  </div>
+
+  <script>
+    const shortHeroName = (name) => name.startsWith("npc_dota_hero_")
+      ? name.slice("npc_dota_hero_".length)
+      : name;
+
+    const formatGameTime = (seconds) => {
+      const sign = seconds < 0 ? "-" : "";
+      const absVal = Math.abs(seconds);
+      const mm = Math.floor(absVal / 60);
+      const ss = absVal - mm * 60;
+      return `${sign}${String(mm).padStart(2, "0")}:${ss.toFixed(2).padStart(5, "0")}`;
+    };
+
+    const mapToCanvas = (x, y, bounds, canvas) => {
+      const pad = 40;
+      const nx = bounds.max_x === bounds.min_x ? 0 : (x - bounds.min_x) / (bounds.max_x - bounds.min_x);
+      const ny = bounds.max_y === bounds.min_y ? 0 : (y - bounds.min_y) / (bounds.max_y - bounds.min_y);
+      const cx = pad + nx * (canvas.width - 2 * pad);
+      const cy = pad + (1 - ny) * (canvas.height - 2 * pad);
+      return [cx, cy];
+    };
+
+    const stateAtTick = (timeline, tick) => {
+      const ticks = timeline.ticks;
+      let left = 0;
+      let right = ticks.length - 1;
+      let ans = -1;
+      while (left <= right) {
+        const mid = (left + right) >> 1;
+        if (ticks[mid] <= tick) {
+          ans = mid;
+          left = mid + 1;
+        } else {
+          right = mid - 1;
+        }
+      }
+      return ans < 0 ? null : timeline.states[ans];
+    };
+
+    const fileLine = document.getElementById("fileLine");
+    const tickLine = document.getElementById("tickLine");
+    const playBtn = document.getElementById("playBtn");
+    const slider = document.getElementById("slider");
+    const canvas = document.getElementById("mapCanvas");
+    const ctx = canvas.getContext("2d");
+
+    let data = null;
+    let playing = false;
+    let timer = null;
+    let currentTick = 0;
+
+    const render = (tick) => {
+      tick = Math.max(data.game_start_tick, Math.min(data.game_end_tick, tick));
+      currentTick = tick;
+      slider.value = String(tick);
+
+      const gameSeconds = (tick - data.game_start_tick) / data.tick_rate;
+      tickLine.textContent = `Tick: ${tick} | 游戏时间: ${formatGameTime(gameSeconds)} | tick_rate: ${data.tick_rate.toFixed(2)}`;
+
+      ctx.fillStyle = "#111";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.strokeStyle = "#666";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(20, 20, canvas.width - 40, canvas.height - 40);
+      ctx.fillStyle = "#ccc";
+      ctx.font = "14px Arial";
+      ctx.fillText("地图（归一化坐标）", 30, 36);
+
+      for (const timeline of data.player_timelines) {
+        const st = stateAtTick(timeline, tick);
+        if (!st) continue;
+        const [cx, cy] = mapToCanvas(st.x, st.y, data.map_bounds, canvas);
+
+        ctx.beginPath();
+        ctx.fillStyle = st.team === 2 ? "#4CAF50" : "#F44336";
+        ctx.strokeStyle = "#ddd";
+        ctx.arc(cx, cy, 6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = "#fff";
+        ctx.font = "12px Arial";
+        ctx.fillText(shortHeroName(st.hero_name), cx + 9, cy - 8);
+      }
+    };
+
+    const stopPlayback = () => {
+      playing = false;
+      playBtn.textContent = "播放";
+      if (timer) {
+        clearInterval(timer);
+        timer = null;
+      }
+    };
+
+    const startPlayback = () => {
+      playing = true;
+      playBtn.textContent = "暂停";
+      const delay = Math.max(Math.round(1000 / data.tick_rate), 1);
+      timer = setInterval(() => {
+        if (currentTick >= data.game_end_tick) {
+          stopPlayback();
+          return;
+        }
+        render(currentTick + 1);
+      }, delay);
+    };
+
+    playBtn.addEventListener("click", () => {
+      if (!data) return;
+      if (playing) stopPlayback();
+      else startPlayback();
+    });
+
+    slider.addEventListener("input", (e) => {
+      if (!data) return;
+      render(Number(e.target.value));
+    });
+
+    (async () => {
+      const res = await fetch("/data");
+      data = await res.json();
+      fileLine.textContent = `文件: ${data.dem_path}`;
+      slider.min = String(data.game_start_tick);
+      slider.max = String(data.game_end_tick);
+      slider.value = String(data.game_start_tick);
+      render(data.game_start_tick);
+    })();
+  </script>
+</body>
+</html>
+"""
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Dota2 回放英雄位置简易 GUI 播放器")
+    parser = argparse.ArgumentParser(description="Dota2 回放英雄位置简易 GUI（浏览器版）")
     parser.add_argument(
         "input_replay",
         nargs="?",
         default=None,
         help="回放路径（.dem 或 .dem.bz2）。不传则尝试使用 replay_samples 下第一个回放。",
     )
-    parser.add_argument("--width", type=int, default=900, help="窗口宽度（默认 900）")
-    parser.add_argument("--height", type=int, default=980, help="窗口高度（默认 980）")
+    parser.add_argument("--host", default="127.0.0.1", help="Web 服务监听地址（默认 127.0.0.1）")
+    parser.add_argument("--port", type=int, default=8765, help="Web 服务端口（默认 8765）")
+    parser.add_argument(
+        "--no-open-browser",
+        action="store_true",
+        help="不自动打开浏览器，仅打印访问地址。",
+    )
+    parser.add_argument(
+        "--no-server",
+        action="store_true",
+        help="只解析并打印摘要，不启动 Web GUI（用于测试）。",
+    )
+    parser.add_argument(
+        "--export-json",
+        default=None,
+        help="可选：将 GUI 使用的数据导出为 JSON 文件。",
+    )
     return parser.parse_args()
 
 
@@ -84,231 +254,118 @@ def compute_tick_rate(match: Any) -> float:
     return 30.0
 
 
-def tick_to_game_time_seconds(tick: int, game_start_tick: int, tick_rate: float) -> float:
-    # tick 与游戏时间换算关系：
-    # game_time_seconds = (tick - game_start_tick) / tick_rate
-    return (tick - game_start_tick) / tick_rate
+def build_gui_payload(replay_path: Path) -> dict[str, Any]:
+    print(f"[info] 读取回放: {replay_path}")
+    dem_path = ensure_dem_path(replay_path)
+    print(f"[info] 解析 DEM: {dem_path}")
 
+    match = gem.parse(str(dem_path))
+    dfs = gem.parse_to_dataframe(str(dem_path))
+    positions_df = dfs.get("positions")
+    if positions_df is None or len(positions_df) == 0:
+        raise RuntimeError("解析结果中没有 positions 数据，无法绘制英雄位置。")
 
-def format_game_time(seconds: float) -> str:
-    sign = "-" if seconds < 0 else ""
-    seconds_abs = abs(seconds)
-    mm = int(seconds_abs // 60)
-    ss = seconds_abs - mm * 60
-    return f"{sign}{mm:02d}:{ss:05.2f}"
-
-
-def short_hero_name(hero_name: str) -> str:
-    prefix = "npc_dota_hero_"
-    if hero_name.startswith(prefix):
-        return hero_name[len(prefix) :]
-    return hero_name
-
-
-class ReplayPositionGUI:
-    def __init__(self, replay_path: Path, width: int, height: int) -> None:
-        self.replay_path = replay_path
-        self.window_width = width
-        self.window_height = height
-
-        self.match = None
-        self.tick_rate = 30.0
-        self.game_start_tick = 0
-        self.game_end_tick = 0
-        self.current_tick = 0
-
-        # player_id -> {"ticks": [...], "states": [HeroState, ...]}
-        self.player_timelines: dict[int, dict[str, Any]] = {}
-
-        # 地图范围（根据 positions 数据动态归一化）
-        self.min_x = 0.0
-        self.max_x = 1.0
-        self.min_y = 0.0
-        self.max_y = 1.0
-
-        self.root = tk.Tk()
-        self.root.title("Dota2 回放英雄位置（简易版）")
-        self.root.geometry(f"{self.window_width}x{self.window_height}")
-
-        self.playing = False
-        self.after_id: str | None = None
-        self._suppress_scale_callback = False
-
-        self._build_ui()
-        self._load_replay()
-        self._render_tick(self.current_tick)
-
-    def _build_ui(self) -> None:
-        top_frame = tk.Frame(self.root)
-        top_frame.pack(fill=tk.X, padx=8, pady=6)
-
-        self.file_label = tk.Label(top_frame, text="文件: -", anchor="w")
-        self.file_label.pack(fill=tk.X)
-
-        self.tick_label = tk.Label(top_frame, text="Tick: -", anchor="w")
-        self.tick_label.pack(fill=tk.X)
-
-        canvas_height = self.window_height - 190
-        self.canvas = tk.Canvas(self.root, width=self.window_width - 20, height=canvas_height, bg="#111")
-        self.canvas.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
-
-        control_frame = tk.Frame(self.root)
-        control_frame.pack(fill=tk.X, padx=8, pady=(0, 8))
-
-        self.play_btn = tk.Button(control_frame, text="播放", width=10, command=self.toggle_play)
-        self.play_btn.pack(side=tk.LEFT, padx=(0, 10))
-
-        self.scale = tk.Scale(
-            control_frame,
-            from_=0,
-            to=1,
-            orient=tk.HORIZONTAL,
-            showvalue=True,
-            resolution=1,
-            command=self.on_seek,
+    player_timelines: dict[int, dict[str, Any]] = {}
+    sorted_positions = positions_df.sort_values(["player_id", "tick"])
+    for row in sorted_positions.to_dict(orient="records"):
+        player_id = int(row["player_id"])
+        bucket = player_timelines.setdefault(
+            player_id,
+            {
+                "player_id": player_id,
+                "hero_name": str(row["hero_name"]),
+                "team": int(row["team"]),
+                "ticks": [],
+                "states": [],
+            },
         )
-        self.scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
-
-    def _load_replay(self) -> None:
-        print(f"[info] 读取回放: {self.replay_path}")
-        dem_path = ensure_dem_path(self.replay_path)
-        print(f"[info] 解析 DEM: {dem_path}")
-
-        self.match = gem.parse(str(dem_path))
-        dfs = gem.parse_to_dataframe(str(dem_path))
-        positions_df = dfs.get("positions")
-        if positions_df is None or len(positions_df) == 0:
-            raise RuntimeError("解析结果中没有 positions 数据，无法绘制英雄位置。")
-
-        self.tick_rate = compute_tick_rate(self.match)
-        self.game_start_tick = int(self.match.game_start_tick)
-        self.game_end_tick = int(self.match.game_end_tick)
-        self.current_tick = self.game_start_tick
-
-        self.min_x = float(positions_df["x"].min())
-        self.max_x = float(positions_df["x"].max())
-        self.min_y = float(positions_df["y"].min())
-        self.max_y = float(positions_df["y"].max())
-
-        sorted_positions = positions_df.sort_values(["player_id", "tick"])
-        for row in sorted_positions.to_dict(orient="records"):
-            player_id = int(row["player_id"])
-            state = HeroState(
-                player_id=player_id,
-                hero_name=str(row["hero_name"]),
-                team=int(row["team"]),
-                x=float(row["x"]),
-                y=float(row["y"]),
-            )
-            bucket = self.player_timelines.setdefault(player_id, {"ticks": [], "states": []})
-            bucket["ticks"].append(int(row["tick"]))
-            bucket["states"].append(state)
-
-        self.file_label.config(text=f"文件: {dem_path}")
-        self.scale.config(from_=self.game_start_tick, to=self.game_end_tick)
-        self._set_scale_value(self.current_tick)
-
-        print(
-            f"[info] 回放范围: {self.game_start_tick} -> {self.game_end_tick}, "
-            f"tick_rate={self.tick_rate:.2f}, 玩家轨迹={len(self.player_timelines)}"
+        bucket["ticks"].append(int(row["tick"]))
+        bucket["states"].append(
+            {
+                "x": float(row["x"]),
+                "y": float(row["y"]),
+                "team": int(row["team"]),
+                "hero_name": str(row["hero_name"]),
+            }
         )
 
-    def _set_scale_value(self, tick: int) -> None:
-        self._suppress_scale_callback = True
-        self.scale.set(tick)
-        self._suppress_scale_callback = False
+    payload = {
+        "dem_path": str(dem_path),
+        "match_id": int(match.match_id),
+        "game_start_tick": int(match.game_start_tick),
+        "game_end_tick": int(match.game_end_tick),
+        "tick_rate": compute_tick_rate(match),
+        # tick 与游戏时间换算关系：
+        # game_time_seconds = (tick - game_start_tick) / tick_rate
+        "tick_game_time_relation": "(tick - game_start_tick) / tick_rate",
+        "map_bounds": {
+            "min_x": float(positions_df["x"].min()),
+            "max_x": float(positions_df["x"].max()),
+            "min_y": float(positions_df["y"].min()),
+            "max_y": float(positions_df["y"].max()),
+        },
+        "player_timelines": list(player_timelines.values()),
+    }
+    print(
+        f"[info] 回放范围: {payload['game_start_tick']} -> {payload['game_end_tick']}, "
+        f"tick_rate={payload['tick_rate']:.2f}, 玩家轨迹={len(payload['player_timelines'])}"
+    )
+    return payload
 
-    def _map_to_canvas(self, x: float, y: float) -> tuple[float, float]:
-        width = max(self.canvas.winfo_width(), 100)
-        height = max(self.canvas.winfo_height(), 100)
-        pad = 40
-        nx = 0.0 if self.max_x == self.min_x else (x - self.min_x) / (self.max_x - self.min_x)
-        ny = 0.0 if self.max_y == self.min_y else (y - self.min_y) / (self.max_y - self.min_y)
-        cx = pad + nx * (width - 2 * pad)
-        cy = pad + (1.0 - ny) * (height - 2 * pad)
-        return cx, cy
 
-    def _hero_states_at_tick(self, tick: int) -> list[HeroState]:
-        out: list[HeroState] = []
-        for timeline in self.player_timelines.values():
-            ticks = timeline["ticks"]
-            idx = bisect.bisect_right(ticks, tick) - 1
-            if idx < 0:
-                continue
-            out.append(timeline["states"][idx])
-        return out
+def run_server(host: str, port: int, payload: dict[str, Any], open_browser: bool) -> None:
+    payload_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    html_bytes = HTML_TEMPLATE.encode("utf-8")
 
-    def _render_tick(self, tick: int) -> None:
-        tick = max(self.game_start_tick, min(self.game_end_tick, int(tick)))
-        self.current_tick = tick
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            if self.path == "/" or self.path.startswith("/?"):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(html_bytes)))
+                self.end_headers()
+                self.wfile.write(html_bytes)
+                return
+            if self.path == "/data":
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(payload_bytes)))
+                self.end_headers()
+                self.wfile.write(payload_bytes)
+                return
+            self.send_response(404)
+            self.end_headers()
 
-        game_seconds = tick_to_game_time_seconds(tick, self.game_start_tick, self.tick_rate)
-        self.tick_label.config(
-            text=f"Tick: {tick} | 游戏时间: {format_game_time(game_seconds)} | tick_rate: {self.tick_rate:.2f}"
-        )
-
-        self.canvas.delete("all")
-        width = max(self.canvas.winfo_width(), 100)
-        height = max(self.canvas.winfo_height(), 100)
-        self.canvas.create_rectangle(20, 20, width - 20, height - 20, outline="#555", width=2)
-        self.canvas.create_text(28, 12, text="地图（归一化坐标）", fill="#ccc", anchor="w")
-
-        states = self._hero_states_at_tick(tick)
-        for state in states:
-            color = "#4CAF50" if state.team == 2 else "#F44336"
-            cx, cy = self._map_to_canvas(state.x, state.y)
-            r = 7
-            self.canvas.create_oval(cx - r, cy - r, cx + r, cy + r, fill=color, outline="#ddd")
-            self.canvas.create_text(
-                cx + 10,
-                cy - 10,
-                text=short_hero_name(state.hero_name),
-                fill="#fff",
-                anchor="w",
-                font=("Arial", 9),
-            )
-
-        self._set_scale_value(tick)
-
-    def on_seek(self, value: str) -> None:
-        if self._suppress_scale_callback:
-            return
-        target_tick = int(float(value))
-        self._render_tick(target_tick)
-
-    def toggle_play(self) -> None:
-        self.playing = not self.playing
-        self.play_btn.config(text="暂停" if self.playing else "播放")
-        if self.playing:
-            self._schedule_next_tick()
-        elif self.after_id is not None:
-            self.root.after_cancel(self.after_id)
-            self.after_id = None
-
-    def _schedule_next_tick(self) -> None:
-        if not self.playing:
+        def log_message(self, format_str: str, *args: Any) -> None:
             return
 
-        next_tick = self.current_tick + 1
-        if next_tick > self.game_end_tick:
-            self.playing = False
-            self.play_btn.config(text="播放")
-            self.after_id = None
-            return
-
-        self._render_tick(next_tick)
-        delay_ms = max(int(round(1000.0 / self.tick_rate)), 1)
-        self.after_id = self.root.after(delay_ms, self._schedule_next_tick)
-
-    def run(self) -> None:
-        self.root.mainloop()
+    server = ThreadingHTTPServer((host, port), Handler)
+    url = f"http://{host}:{port}/"
+    print(f"[done] GUI 地址: {url}")
+    if open_browser:
+        webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
 
 
 def main() -> None:
     args = parse_args()
     replay_path = resolve_input_path(args.input_replay)
-    app = ReplayPositionGUI(replay_path=replay_path, width=args.width, height=args.height)
-    app.run()
+    payload = build_gui_payload(replay_path)
+
+    if args.export_json:
+        out = Path(args.export_json).expanduser().resolve()
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[done] 已导出 GUI 数据: {out}")
+
+    if args.no_server:
+        return
+    run_server(args.host, args.port, payload, open_browser=not args.no_open_browser)
 
 
 if __name__ == "__main__":

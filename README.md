@@ -67,6 +67,8 @@ python3 extract_replay_ticks.py replay.dem \
 - 播放/暂停按钮
 - 可拖动进度条（按 tick 跳转）
 
+该 GUI 为浏览器版，不依赖本地桌面 GUI 库。
+
 ### 启动方式
 
 ```bash
@@ -78,3 +80,17 @@ python3 replay_position_gui.py /path/to/replay.dem.bz2
 ```
 
 如果不传路径，脚本会尝试读取 `replay_samples/` 下的第一个回放文件。
+
+默认会启动本地 Web 服务并自动打开浏览器，访问地址通常是：
+
+- `http://127.0.0.1:8765/`
+
+可选参数示例：
+
+```bash
+# 仅解析并导出 GUI 数据，不启动服务
+python3 replay_position_gui.py replay.dem --no-server --export-json output/gui_payload.json
+
+# 指定监听地址和端口
+python3 replay_position_gui.py replay.dem --host 0.0.0.0 --port 9000
+```
