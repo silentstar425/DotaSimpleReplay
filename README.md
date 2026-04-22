@@ -127,3 +127,15 @@ python3 replay_position_gui_tk.py replay.dem --width 1000 --height 1000
 
 - Tkinter 版本依赖本地 Python 的 `tkinter` 模块（通常由系统包 `python3-tk` 提供）。
 - 按你的要求，该版本代码已开发完成，但不在云端环境执行测试。
+
+## 测试回放文件
+
+项目中保留了测试目录与样例回放文件：
+
+- 目录：`replay_samples/`
+- 文件：`replay_samples/test_replay_8781301871.dem.bz2`
+
+说明：
+
+- 该文件可直接用于 `extract_replay_ticks.py` 与两个 GUI 脚本的快速验证。
+- 选择保留 `.dem.bz2` 压缩格式，以减少仓库体积；脚本会自动解压为 `.dem`（若需要）。
