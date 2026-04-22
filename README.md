@@ -94,3 +94,36 @@ python3 replay_position_gui.py replay.dem --no-server --export-json output/gui_p
 # 指定监听地址和端口
 python3 replay_position_gui.py replay.dem --host 0.0.0.0 --port 9000
 ```
+
+## Tkinter 版 GUI 回放（英雄位置）
+
+新增脚本：`replay_position_gui_tk.py`
+
+功能与浏览器版一致：
+
+- 展示英雄位置（2D 归一化坐标）
+- 按标准速度逐 tick 播放
+- 播放/暂停按钮
+- 可拖动进度条（按 tick 跳转）
+
+启动方式：
+
+```bash
+# 指定回放
+python3 replay_position_gui_tk.py /path/to/replay.dem
+
+# 也支持 .dem.bz2（会自动解压）
+python3 replay_position_gui_tk.py /path/to/replay.dem.bz2
+```
+
+可选参数：
+
+```bash
+# 自定义窗口大小
+python3 replay_position_gui_tk.py replay.dem --width 1000 --height 1000
+```
+
+说明：
+
+- Tkinter 版本依赖本地 Python 的 `tkinter` 模块（通常由系统包 `python3-tk` 提供）。
+- 按你的要求，该版本代码已开发完成，但不在云端环境执行测试。
