@@ -10,10 +10,27 @@
 4. 支持按游戏时间筛选提取范围
 5. 自动生成变量说明表（Markdown）
 
-## 安装依赖
+## 使用 uv 管理环境（推荐）
+
+项目已切换为 `uv` 管理 Python 环境与依赖，包含：
+
+- `pyproject.toml`：项目依赖声明
+- `uv.lock`：锁定依赖版本
+- `.python-version`：建议 Python 版本（3.12）
+
+常用命令：
 
 ```bash
-pip3 install --user gem-dota
+# 1) 安装 uv（若本机尚未安装）
+pip3 install --user uv
+
+# 2) 根据锁文件创建/同步虚拟环境
+uv sync
+
+# 3) 在 uv 环境中运行脚本
+uv run python extract_replay_ticks.py <input.dem|input.dem.bz2>
+uv run python replay_position_gui.py <input.dem|input.dem.bz2>
+uv run python replay_position_gui_tk.py <input.dem|input.dem.bz2>
 ```
 
 ## 基本用法
