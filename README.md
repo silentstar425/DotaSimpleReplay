@@ -55,3 +55,26 @@ python3 extract_replay_ticks.py replay.dem \
 - `tick = round(game_start_tick + game_time_seconds * tick_rate)`
 
 输出 JSON 的 `meta.tick_game_time_relation` 中也会记录该关系。
+
+## 简易 GUI 回放（英雄位置）
+
+新增脚本：`replay_position_gui.py`
+
+功能：
+
+- 展示当前回放中英雄在地图上的位置（2D 归一化坐标）
+- 按标准速度逐 tick 播放
+- 播放/暂停按钮
+- 可拖动进度条（按 tick 跳转）
+
+### 启动方式
+
+```bash
+# 指定回放
+python3 replay_position_gui.py /path/to/replay.dem
+
+# 也支持 .dem.bz2（会自动解压）
+python3 replay_position_gui.py /path/to/replay.dem.bz2
+```
+
+如果不传路径，脚本会尝试读取 `replay_samples/` 下的第一个回放文件。
