@@ -266,6 +266,9 @@ HTML_TEMPLATE = """<!doctype html>
     let playing = false;
     let timer = null;
     let currentTick = 0;
+    let currentTickFloat = 0;
+    let playbackAnchorRealMs = 0;
+    let playbackAnchorTick = 0;
 
     const renderMap = (tick) => {
       ctx.fillStyle = "#111";
@@ -370,7 +373,7 @@ HTML_TEMPLATE = """<!doctype html>
     };
 
     const render = (tick) => {
-      tick = Math.max(0, Math.min(data.game_end_tick, tick));
+      tick = Math.max(0, Math.min(data.game_end_tick, Math.round(tick)));
       currentTick = tick;
       slider.value = String(tick);
 
@@ -379,6 +382,12 @@ HTML_TEMPLATE = """<!doctype html>
       renderMap(tick);
       renderBoard(tick);
       renderStatus(tick);
+    };
+
+    const renderFromFloat = (tickFloat) => {
+      const clamped = Math.max(0, Math.min(data.game_end_tick, tickFloat));
+      currentTickFloat = clamped;
+      render(clamped);
     };
 
     const stopPlayback = () => {
@@ -395,13 +404,18 @@ HTML_TEMPLATE = """<!doctype html>
       fpsInput.value = String(Math.round(fps));
       playing = true;
       playBtn.textContent = "暂停";
+      playbackAnchorRealMs = performance.now();
+      playbackAnchorTick = currentTickFloat;
       const delay = Math.max(Math.round(1000 / fps), 1);
       timer = setInterval(() => {
-        if (currentTick >= data.game_end_tick) {
+        const elapsedSec = (performance.now() - playbackAnchorRealMs) / 1000;
+        const targetTickFloat = playbackAnchorTick + elapsedSec * data.tick_rate;
+        if (targetTickFloat >= data.game_end_tick) {
+          renderFromFloat(data.game_end_tick);
           stopPlayback();
           return;
         }
-        render(currentTick + 1);
+        renderFromFloat(targetTickFloat);
       }, delay);
     };
 
@@ -413,7 +427,11 @@ HTML_TEMPLATE = """<!doctype html>
 
     slider.addEventListener("input", (e) => {
       if (!data) return;
-      render(Number(e.target.value));
+      renderFromFloat(Number(e.target.value));
+      if (playing) {
+        playbackAnchorRealMs = performance.now();
+        playbackAnchorTick = currentTickFloat;
+      }
     });
 
     boardMetric.addEventListener("change", () => {
@@ -440,7 +458,7 @@ HTML_TEMPLATE = """<!doctype html>
       slider.max = String(data.game_end_tick);
       slider.value = "0";
       fpsInput.value = String(data.playback_fps || 30);
-      render(0);
+      renderFromFloat(0);
     })();
   </script>
 </body>
@@ -519,7 +537,8 @@ def compute_tick_rate(match: Any) -> float:
 
 def _parse_player_snapshots(dem_path: Path) -> tuple[ReplayParser, PlayerExtractor]:
     parser = ReplayParser(str(dem_path))
-    player_ext = PlayerExtractor(sample_interval=30, minute_snapshots=False)
+    # 使用逐 tick 采样，确保刷新率提升时有足够细粒度的数据可更新。
+    player_ext = PlayerExtractor(sample_interval=1, minute_snapshots=False)
     player_ext.attach(parser)
     parser.parse()
     return parser, player_ext

@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 import tkinter as tk
 from tkinter import ttk
+import time
 
 import gem
 from gem.extractors.players import PlayerExtractor
@@ -175,6 +176,9 @@ class ReplayPositionTkGUI:
         self.playing = False
         self.after_id: str | None = None
         self._suppress_scale_callback = False
+        self.current_tick_float = 0.0
+        self.playback_anchor_real_s = 0.0
+        self.playback_anchor_tick = 0.0
 
         self.root = tk.Tk()
         self.root.title("Dota2 回放增强 GUI（Tkinter 版）")
@@ -182,7 +186,7 @@ class ReplayPositionTkGUI:
 
         self._build_ui()
         self._load_replay()
-        self._render_tick(0)
+        self._render_tick_float(0.0)
 
     def _build_ui(self) -> None:
         container = tk.Frame(self.root, bg="#0f1116")
@@ -347,7 +351,8 @@ class ReplayPositionTkGUI:
 
         match = gem.parse(str(dem_path))
         parser = ReplayParser(str(dem_path))
-        player_ext = PlayerExtractor(sample_interval=30, minute_snapshots=False)
+        # 使用逐 tick 采样，确保刷新率提升时有足够细粒度的数据可更新。
+        player_ext = PlayerExtractor(sample_interval=1, minute_snapshots=False)
         player_ext.attach(parser)
         parser.parse()
 
@@ -355,6 +360,7 @@ class ReplayPositionTkGUI:
         self.game_start_tick = int(match.game_start_tick)
         self.game_end_tick = max(int(match.game_end_tick), int(parser.tick))
         self.current_tick = 0
+        self.current_tick_float = 0.0
 
         by_pid: dict[int, PlayerTimeline] = {}
         hero_to_pid: dict[str, int] = {}
@@ -589,10 +595,18 @@ class ReplayPositionTkGUI:
         self._render_status(tick)
         self._set_scale_value(tick)
 
+    def _render_tick_float(self, tick_float: float) -> None:
+        clamped = max(0.0, min(float(self.game_end_tick), float(tick_float)))
+        self.current_tick_float = clamped
+        self._render_tick(int(round(clamped)))
+
     def on_seek(self, value: str) -> None:
         if self._suppress_scale_callback:
             return
-        self._render_tick(int(float(value)))
+        self._render_tick_float(float(value))
+        if self.playing:
+            self.playback_anchor_real_s = time.perf_counter()
+            self.playback_anchor_tick = self.current_tick_float
 
     def _get_fps(self) -> int:
         try:
@@ -617,6 +631,8 @@ class ReplayPositionTkGUI:
     def _start_playback(self) -> None:
         self.playing = True
         self.play_btn.config(text="暂停")
+        self.playback_anchor_real_s = time.perf_counter()
+        self.playback_anchor_tick = self.current_tick_float
         self._schedule_next_tick()
 
     def _stop_playback(self) -> None:
@@ -629,11 +645,13 @@ class ReplayPositionTkGUI:
     def _schedule_next_tick(self) -> None:
         if not self.playing:
             return
-        next_tick = self.current_tick + 1
-        if next_tick > self.game_end_tick:
+        elapsed_s = time.perf_counter() - self.playback_anchor_real_s
+        target_tick_float = self.playback_anchor_tick + elapsed_s * self.tick_rate
+        if target_tick_float >= self.game_end_tick:
+            self._render_tick_float(float(self.game_end_tick))
             self._stop_playback()
             return
-        self._render_tick(next_tick)
+        self._render_tick_float(target_tick_float)
         delay_ms = max(int(round(1000.0 / self._get_fps())), 1)
         self.after_id = self.root.after(delay_ms, self._schedule_next_tick)
 
