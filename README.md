@@ -77,12 +77,22 @@ python3 extract_replay_ticks.py replay.dem \
 
 新增脚本：`replay_position_gui.py`
 
-功能：
+当前增强版功能：
 
-- 展示当前回放中英雄在地图上的位置（2D 归一化坐标）
-- 按标准速度逐 tick 播放
+- 从 `tick=0` 开始播放（不是从游戏时间 0 对应的 `game_start_tick` 开始）
+- 地图上展示英雄位置（2D 归一化坐标）
+- 按 tick 播放，默认刷新率 `30 FPS`（可调）
 - 播放/暂停按钮
 - 可拖动进度条（按 tick 跳转）
+- 左侧看板（下拉选择并按降序展示）：
+  - 资产总额
+  - K/D/A
+  - 正补/反补
+  - 等级
+- 右侧英雄状态：
+  - 每位英雄 HP / MP
+  - 死亡时显示复活剩余时间
+- 英雄死亡时不在地图上显示对应图标
 
 该 GUI 为浏览器版，不依赖本地桌面 GUI 库。
 
@@ -110,16 +120,26 @@ python3 replay_position_gui.py replay.dem --no-server --export-json output/gui_p
 
 # 指定监听地址和端口
 python3 replay_position_gui.py replay.dem --host 0.0.0.0 --port 9000
+
+# 指定默认播放刷新率（FPS）
+python3 replay_position_gui.py replay.dem --fps 30
 ```
+
+说明：
+
+- `tick_rate` 表示“每秒游戏模拟 tick 数”（数据时间轴频率，通常接近 30），不是 UI 的绘制刷新率。
+- GUI 播放刷新率由 `FPS` 控制，属于可调参数（默认 30）。
 
 ## Tkinter 版 GUI 回放（英雄位置）
 
 新增脚本：`replay_position_gui_tk.py`
 
-功能与浏览器版一致：
+功能与浏览器增强版一致：
 
-- 展示英雄位置（2D 归一化坐标）
-- 按标准速度逐 tick 播放
+- 从 `tick=0` 开始播放
+- 展示英雄位置（死亡不显示）
+- 左侧看板 + 右侧状态面板
+- 默认 `30 FPS`，可调
 - 播放/暂停按钮
 - 可拖动进度条（按 tick 跳转）
 
@@ -138,6 +158,9 @@ python3 replay_position_gui_tk.py /path/to/replay.dem.bz2
 ```bash
 # 自定义窗口大小
 python3 replay_position_gui_tk.py replay.dem --width 1000 --height 1000
+
+# 指定默认 FPS
+python3 replay_position_gui_tk.py replay.dem --fps 30
 ```
 
 说明：
