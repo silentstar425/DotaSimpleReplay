@@ -563,6 +563,52 @@ def _parse_player_snapshots(dem_path: Path) -> tuple[ReplayParser, PlayerExtract
     return parser, player_ext
 
 
+def _xp_to_level(xp: int) -> int:
+    # Dota2 英雄等级累计经验阈值（1~30），来自游戏常量。
+    # 数组下标表示等级，值表示达到该等级所需的累计经验。
+    xp_to_reach_level = [
+        0,
+        0,
+        240,
+        640,
+        1160,
+        1760,
+        2440,
+        3200,
+        4040,
+        4960,
+        5960,
+        7040,
+        8200,
+        9440,
+        10760,
+        12160,
+        13640,
+        15200,
+        16840,
+        18560,
+        20360,
+        22240,
+        24200,
+        26240,
+        28360,
+        30560,
+        32840,
+        35200,
+        37640,
+        40160,
+        42760,
+    ]
+    value = max(int(xp), 0)
+    level = 1
+    for idx in range(1, len(xp_to_reach_level)):
+        if value >= xp_to_reach_level[idx]:
+            level = idx
+        else:
+            break
+    return min(level, 30)
+
+
 def _build_death_windows(ticks: list[int], states: list[dict[str, Any]]) -> list[dict[str, int | None]]:
     windows: list[dict[str, int | None]] = []
     dead_start: int | None = None
@@ -641,6 +687,7 @@ def build_gui_payload(replay_path: Path, playback_fps: int) -> tuple[dict[str, A
         pid = int(snap.player_id)
         if pid not in player_timelines:
             continue
+        resolved_level = _xp_to_level(int(snap.xp))
         state = {
             "x": None if snap.x is None else float(snap.x),
             "y": None if snap.y is None else float(snap.y),
@@ -648,7 +695,7 @@ def build_gui_payload(replay_path: Path, playback_fps: int) -> tuple[dict[str, A
             "max_hp": int(snap.max_hp),
             "mana": float(snap.mana),
             "max_mana": float(snap.max_mana),
-            "level": int(snap.level),
+            "level": int(resolved_level),
             "net_worth": int(snap.net_worth),
             "lh": int(snap.lh),
             "dn": int(snap.dn),

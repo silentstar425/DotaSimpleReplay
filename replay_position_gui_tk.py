@@ -125,6 +125,52 @@ def format_game_time(seconds: float) -> str:
     return f"{sign}{mm:02d}:{ss:05.2f}"
 
 
+def level_from_xp(total_xp: int) -> int:
+    """根据累计 XP 估算英雄等级（上限 30）。"""
+    xp = max(int(total_xp), 0)
+    # Dota 2 常用升级阈值（累计 XP 到达该值时升到对应等级）。
+    # 索引 i 表示达到 levels[i] 后为等级 i+1。
+    levels = [
+        0,
+        240,
+        640,
+        1160,
+        1760,
+        2440,
+        3200,
+        4040,
+        4960,
+        5960,
+        7040,
+        8200,
+        9440,
+        10760,
+        12160,
+        13640,
+        15200,
+        16840,
+        18560,
+        20360,
+        22240,
+        24200,
+        26240,
+        28360,
+        30560,
+        32840,
+        35200,
+        37640,
+        40160,
+        42760,
+    ]
+    level = 1
+    for i, need in enumerate(levels, start=1):
+        if xp >= need:
+            level = i
+        else:
+            break
+    return min(level, 30)
+
+
 def short_hero_name(hero_name: str) -> str:
     prefix = "npc_dota_hero_"
     return hero_name[len(prefix) :] if hero_name.startswith(prefix) else hero_name
@@ -438,7 +484,7 @@ class ReplayPositionTkGUI:
                 "max_hp": int(snap.max_hp),
                 "mana": float(snap.mana),
                 "max_mana": float(snap.max_mana),
-                "level": int(snap.level),
+                "level": level_from_xp(int(snap.xp)),
                 "net_worth": int(snap.net_worth),
                 "lh": int(snap.lh),
                 "dn": int(snap.dn),
