@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import bz2
 import json
+import sys
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -24,6 +25,7 @@ import gem
 from gem.extractors.players import PlayerExtractor
 from gem.parser import ReplayParser
 from replay_cache import cache_path_for_dem, delete_replay_cache, load_replay_cache, save_replay_cache
+from replay_world_entities import WorldEntityCollector
 
 
 HTML_TEMPLATE = """<!doctype html>
@@ -167,7 +169,7 @@ HTML_TEMPLATE = """<!doctype html>
         <input id="fpsInput" type="number" min="1" max="240" step="1" value="30" style="width: 76px;" />
       </div>
       <canvas id="mapCanvas" width="1200" height="780"></canvas>
-      <div class="legend">绿色：天辉（team=2） | 红色：夜魇（team=3） | 死亡英雄不会显示在地图上</div>
+      <div class="legend">英雄：绿/红圆点（天辉/夜魇，死亡不显示） | 建筑：基/塔/营/建 | 单位：近/远/车/野 | 资源点：莲/肉/折</div>
     </main>
 
     <aside class="side right">
@@ -222,6 +224,113 @@ HTML_TEMPLATE = """<!doctype html>
       const idx = upperBound(timeline.ticks, tick) - 1;
       if (idx < 0) return null;
       return timeline.states[idx];
+    };
+
+    const entityShortName = (name) => {
+      if (!name) return "";
+      return String(name)
+        .replace("npc_dota_", "")
+        .replace("goodguys_", "")
+        .replace("badguys_", "")
+        .replace("neutral_", "");
+    };
+
+    const entityGlyph = (timeline) => {
+      const category = timeline.category || "other";
+      const subtype = timeline.subtype || "other";
+      if (category === "building") {
+        if (subtype === "base") return "基";
+        if (subtype === "tower") return "塔";
+        if (subtype === "barracks") return "营";
+        return "建";
+      }
+      if (category === "creep") {
+        if (subtype === "melee") return "近";
+        if (subtype === "ranged") return "远";
+        if (subtype === "siege") return "车";
+        if (subtype === "neutral") return "野";
+        return "兵";
+      }
+      if (category === "lotus_pool") return "莲";
+      if (category === "roshan") return "肉";
+      if (category === "tormentor") return "折";
+      return "?";
+    };
+
+    const entityColors = (timeline) => {
+      const category = timeline.category || "other";
+      const subtype = timeline.subtype || "other";
+      if (category === "building") {
+        if (subtype === "base") return { fill: "#f9a825", stroke: "#fff3c4" };
+        if (subtype === "tower") return { fill: "#ef6c00", stroke: "#ffe0b2" };
+        if (subtype === "barracks") return { fill: "#8d6e63", stroke: "#d7ccc8" };
+        return { fill: "#546e7a", stroke: "#cfd8dc" };
+      }
+      if (category === "creep") {
+        if (subtype === "melee") return { fill: "#78909c", stroke: "#eceff1" };
+        if (subtype === "ranged") return { fill: "#26a69a", stroke: "#e0f2f1" };
+        if (subtype === "siege") return { fill: "#607d8b", stroke: "#cfd8dc" };
+        if (subtype === "neutral") return { fill: "#8e24aa", stroke: "#f3e5f5" };
+        return { fill: "#5c6bc0", stroke: "#e8eaf6" };
+      }
+      if (category === "lotus_pool") return { fill: "#00acc1", stroke: "#e0f7fa" };
+      if (category === "roshan") return { fill: "#6d4c41", stroke: "#efebe9" };
+      if (category === "tormentor") return { fill: "#6a1b9a", stroke: "#f3e5f5" };
+      return { fill: "#455a64", stroke: "#eceff1" };
+    };
+
+    const drawEntityGlyph = (ctx2, cx, cy, timeline) => {
+      const category = timeline.category || "other";
+      const subtype = timeline.subtype || "other";
+      const colors = entityColors(timeline);
+      const glyph = entityGlyph(timeline);
+      const radius = category === "roshan" || category === "tormentor" ? 9 : 7;
+
+      ctx2.strokeStyle = colors.stroke;
+      ctx2.fillStyle = colors.fill;
+      ctx2.lineWidth = 1.2;
+      ctx2.beginPath();
+      if (category === "building" && subtype === "tower") {
+        ctx2.moveTo(cx, cy - radius);
+        ctx2.lineTo(cx - radius, cy + radius);
+        ctx2.lineTo(cx + radius, cy + radius);
+        ctx2.closePath();
+      } else if (category === "building" && subtype === "barracks") {
+        ctx2.moveTo(cx, cy - radius);
+        ctx2.lineTo(cx - radius, cy);
+        ctx2.lineTo(cx, cy + radius);
+        ctx2.lineTo(cx + radius, cy);
+        ctx2.closePath();
+      } else if (category === "creep" && subtype === "siege") {
+        ctx2.rect(cx - radius, cy - radius * 0.7, radius * 2, radius * 1.4);
+      } else {
+        ctx2.arc(cx, cy, radius, 0, Math.PI * 2);
+      }
+      ctx2.fill();
+      ctx2.stroke();
+
+      ctx2.fillStyle = "#ffffff";
+      ctx2.font = "10px Arial";
+      ctx2.textAlign = "center";
+      ctx2.textBaseline = "middle";
+      ctx2.fillText(glyph, cx, cy);
+    };
+
+    const renderWorldEntities = (tick) => {
+      for (const timeline of (data.entity_timelines || [])) {
+        const st = stateAtTick(timeline, tick);
+        if (!st || st.x === null || st.y === null || !st.active) continue;
+        const [cx, cy] = mapToCanvas(st.x, st.y, data.map_bounds, canvas);
+        drawEntityGlyph(ctx, cx, cy, timeline);
+
+        if (timeline.category === "roshan" || timeline.category === "tormentor" || timeline.category === "lotus_pool") {
+          ctx.fillStyle = "#d9e4f0";
+          ctx.font = "10px Arial";
+          ctx.textAlign = "left";
+          ctx.textBaseline = "bottom";
+          ctx.fillText(entityShortName(timeline.entity_name), cx + 10, cy - 2);
+        }
+      }
     };
 
     const killsAtTick = (timeline, tick) => upperBound(timeline.kill_event_ticks, tick);
@@ -281,6 +390,7 @@ HTML_TEMPLATE = """<!doctype html>
       ctx.fillStyle = "#ccc";
       ctx.font = "14px Arial";
       ctx.fillText("地图（归一化坐标）", 30, 36);
+      renderWorldEntities(tick);
 
       for (const timeline of data.player_timelines) {
         const st = stateAtTick(timeline, tick);
@@ -554,13 +664,48 @@ def compute_tick_rate(match: Any) -> float:
     return 30.0
 
 
-def _parse_player_snapshots(dem_path: Path) -> tuple[ReplayParser, PlayerExtractor]:
+def _print_parse_progress(current_tick: int, total_tick: int, done: bool = False) -> None:
+    if total_tick <= 0:
+        total_tick = 1
+    ratio = max(0.0, min(float(current_tick) / float(total_tick), 1.0))
+    width = 36
+    filled = int(width * ratio)
+    bar = "#" * filled + "-" * (width - filled)
+    percent = ratio * 100.0
+    sys.stdout.write(f"\r[parse] [{bar}] {percent:6.2f}% ({current_tick}/{total_tick} tick)")
+    if done:
+        sys.stdout.write("\n")
+    sys.stdout.flush()
+
+
+def _collect_parse_with_progress(
+    dem_path: Path,
+    estimated_end_tick: int,
+) -> tuple[ReplayParser, PlayerExtractor, WorldEntityCollector]:
     parser = ReplayParser(str(dem_path))
     # 使用逐 tick 采样，确保刷新率提升时有足够细粒度的数据可更新。
     player_ext = PlayerExtractor(sample_interval=1, minute_snapshots=False)
     player_ext.attach(parser)
+    world_ext = WorldEntityCollector(sample_interval=6)
+    world_ext.attach(parser)
+
+    progress_total = max(int(estimated_end_tick), 1)
+    last_report_tick = -10**9
+
+    def _progress_callback(_entity: Any, _op: Any) -> None:
+        nonlocal last_report_tick
+        tick = int(parser.tick)
+        if tick - last_report_tick < 180:
+            return
+        last_report_tick = tick
+        _print_parse_progress(tick, progress_total, done=False)
+
+    parser.on_entity(_progress_callback)
+    _print_parse_progress(0, progress_total, done=False)
     parser.parse()
-    return parser, player_ext
+    final_tick = min(max(int(parser.tick), 0), progress_total)
+    _print_parse_progress(final_tick, progress_total, done=True)
+    return parser, player_ext, world_ext
 
 
 def _xp_to_level(xp: int) -> int:
@@ -641,7 +786,10 @@ def build_gui_payload(replay_path: Path, playback_fps: int) -> tuple[dict[str, A
         return payload, dem_path
 
     match = gem.parse(str(dem_path))
-    parser, player_ext = _parse_player_snapshots(dem_path)
+    parser, player_ext, world_ext = _collect_parse_with_progress(
+        dem_path,
+        estimated_end_tick=max(int(match.game_end_tick), 1),
+    )
     tick_rate = compute_tick_rate(match)
 
     player_timelines: dict[int, dict[str, Any]] = {}
@@ -703,12 +851,23 @@ def build_gui_payload(replay_path: Path, playback_fps: int) -> tuple[dict[str, A
         }
         player_timelines[pid]["ticks"].append(int(snap.tick))
         player_timelines[pid]["states"].append(state)
-
         if state["x"] is not None and state["y"] is not None:
             min_x = min(min_x, state["x"])
             max_x = max(max_x, state["x"])
             min_y = min(min_y, state["y"])
             max_y = max(max_y, state["y"])
+
+    entity_timelines = world_ext.to_payload()
+    for row in entity_timelines:
+        for st in row.get("states", []):
+            x = st.get("x")
+            y = st.get("y")
+            if x is None or y is None:
+                continue
+            min_x = min(min_x, float(x))
+            max_x = max(max_x, float(x))
+            min_y = min(min_y, float(y))
+            max_y = max(max_y, float(y))
 
     for timeline in player_timelines.values():
         timeline["kill_event_ticks"] = sorted(int(x) for x in timeline["kill_event_ticks"])
@@ -735,6 +894,7 @@ def build_gui_payload(replay_path: Path, playback_fps: int) -> tuple[dict[str, A
             "max_y": float(max_y),
         },
         "player_timelines": [player_timelines[k] for k in sorted(player_timelines.keys())],
+        "entity_timelines": entity_timelines,
     }
     save_replay_cache(dem_path, payload)
     payload["cache_enabled"] = True
@@ -743,7 +903,8 @@ def build_gui_payload(replay_path: Path, playback_fps: int) -> tuple[dict[str, A
     print(f"[info] 已写入缓存: {cache_path}")
     print(
         f"[info] 回放范围: 0 -> {payload['game_end_tick']} (game_start_tick={payload['game_start_tick']}), "
-        f"tick_rate={payload['tick_rate']:.2f}, 玩家轨迹={len(payload['player_timelines'])}"
+        f"tick_rate={payload['tick_rate']:.2f}, 玩家轨迹={len(payload['player_timelines'])}, "
+        f"世界实体轨迹={len(payload['entity_timelines'])}"
     )
     return payload, dem_path
 

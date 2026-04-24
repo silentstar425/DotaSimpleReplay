@@ -27,6 +27,7 @@ import gem
 from gem.extractors.players import PlayerExtractor
 from gem.parser import ReplayParser
 from replay_cache import cache_path_for_dem, delete_replay_cache, load_replay_cache, save_replay_cache
+from replay_world_entities import WorldEntityCollector
 
 
 @dataclass
@@ -57,6 +58,27 @@ class PlayerTimeline:
     ticks: list[int] = field(default_factory=list)
     states: list[HeroState] = field(default_factory=list)
     death_windows: list[dict[str, int | None]] = field(default_factory=list)
+
+
+@dataclass
+class WorldEntityState:
+    x: float | None
+    y: float | None
+    hp: int
+    max_hp: int
+    active: bool
+
+
+@dataclass
+class WorldEntityTimeline:
+    entity_id: int
+    entity_name: str
+    class_name: str
+    team: int
+    category: str
+    subtype: str
+    ticks: list[int] = field(default_factory=list)
+    states: list[WorldEntityState] = field(default_factory=list)
 
 
 def parse_args() -> argparse.Namespace:
@@ -220,6 +242,7 @@ class ReplayPositionTkGUI:
         self.min_y = 0.0
         self.max_y = 1.0
         self.timelines: list[PlayerTimeline] = []
+        self.entity_timelines: list[WorldEntityTimeline] = []
 
         self.playing = False
         self.after_id: str | None = None
@@ -230,6 +253,8 @@ class ReplayPositionTkGUI:
         self.dem_path: Path | None = None
         self.cache_path: Path | None = None
         self.cache_hit = False
+        self.progress_var = tk.DoubleVar(value=0.0)
+        self.progress_label_var = tk.StringVar(value="解析进度：等待中")
 
         self.root = tk.Tk()
         self.root.title("Dota2 回放增强 GUI（Tkinter 版）")
@@ -361,6 +386,27 @@ class ReplayPositionTkGUI:
         )
         self.fps_spin.pack(side=tk.LEFT)
 
+        progress_row = tk.Frame(self.center_panel, bg="#0f1116")
+        progress_row.pack(fill=tk.X, padx=9, pady=(0, 6))
+        self.progress_label = tk.Label(
+            progress_row,
+            textvariable=self.progress_label_var,
+            fg="#9ea7b3",
+            bg="#0f1116",
+            anchor="w",
+            font=("Arial", 9),
+        )
+        self.progress_label.pack(side=tk.LEFT, padx=(0, 8))
+        self.progress_bar = ttk.Progressbar(
+            progress_row,
+            orient=tk.HORIZONTAL,
+            mode="determinate",
+            length=220,
+            variable=self.progress_var,
+            maximum=100.0,
+        )
+        self.progress_bar.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
         self.canvas = tk.Canvas(
             self.center_panel,
             bg="#111111",
@@ -371,7 +417,10 @@ class ReplayPositionTkGUI:
 
         tk.Label(
             self.center_panel,
-            text="绿色：天辉（team=2） | 红色：夜魇（team=3） | 死亡英雄不会显示在地图上",
+            text=(
+                "英雄：绿/红圆点；建筑：基/塔/营/建；小兵与野怪：近/远/车/野；"
+                "莲花池/肉山/折磨者：莲/肉/折；死亡英雄不会显示"
+            ),
             fg="#9ea7b3",
             bg="#0f1116",
             anchor="w",
@@ -408,17 +457,26 @@ class ReplayPositionTkGUI:
         self.dem_path = dem_path
         self.cache_path = cache_path_for_dem(dem_path)
         print(f"[info] 解析 DEM: {dem_path}")
+        self.progress_var.set(0.0)
+        self.progress_label_var.set("解析进度：检查缓存")
+        self.root.update_idletasks()
 
         cached = load_replay_cache(dem_path)
         if cached is not None:
             payload = dict(cached)
             self.cache_hit = True
             print(f"[info] 命中缓存: {self.cache_path}")
+            self.progress_var.set(100.0)
+            self.progress_label_var.set("解析进度：缓存命中")
         else:
             self.cache_hit = False
+            self.progress_label_var.set("解析进度：解析中 0.0%")
+            self.root.update_idletasks()
             payload = self._build_payload_from_dem(dem_path)
             save_replay_cache(dem_path, payload)
             print(f"[info] 已写入缓存: {self.cache_path}")
+            self.progress_var.set(100.0)
+            self.progress_label_var.set("解析进度：完成")
         self._apply_cached_payload(payload)
         match_id = int(payload.get("match_id", 0))
 
@@ -427,7 +485,7 @@ class ReplayPositionTkGUI:
 
         print(
             f"[info] 回放范围: 0 -> {self.game_end_tick} (game_start_tick={self.game_start_tick}), "
-            f"tick_rate={self.tick_rate:.2f}, 玩家轨迹={len(self.timelines)}"
+            f"tick_rate={self.tick_rate:.2f}, 玩家轨迹={len(self.timelines)}, 世界实体轨迹={len(self.entity_timelines)}"
         )
 
     def _build_payload_from_dem(self, dem_path: Path) -> dict[str, Any]:
@@ -436,7 +494,28 @@ class ReplayPositionTkGUI:
         # 使用逐 tick 采样，确保刷新率提升时有足够细粒度的数据可更新。
         player_ext = PlayerExtractor(sample_interval=1, minute_snapshots=False)
         player_ext.attach(parser)
+        world_ext = WorldEntityCollector(sample_interval=6)
+        world_ext.attach(parser)
+
+        estimated_end_tick = max(int(match.game_end_tick), 1)
+        last_tick = -10**9
+
+        def _progress_callback(_entity: Any, _op: Any) -> None:
+            nonlocal last_tick
+            tick_now = int(parser.tick)
+            if tick_now - last_tick < 180:
+                return
+            last_tick = tick_now
+            pct = max(0.0, min(100.0, 100.0 * tick_now / float(estimated_end_tick)))
+            self.progress_var.set(pct)
+            self.progress_label_var.set(f"解析进度：{pct:.1f}%")
+            self.root.update_idletasks()
+
+        parser.on_entity(_progress_callback)
         parser.parse()
+        self.progress_var.set(100.0)
+        self.progress_label_var.set("解析进度：构建地图实体轨迹")
+        self.root.update_idletasks()
 
         by_pid: dict[int, dict[str, Any]] = {}
         hero_to_pid: dict[str, int] = {}
@@ -498,6 +577,18 @@ class ReplayPositionTkGUI:
                 min_y = min(min_y, state["y"])
                 max_y = max(max_y, state["y"])
 
+        entity_timelines = world_ext.to_payload()
+        for row in entity_timelines:
+            for st in row.get("states", []):
+                x = st.get("x")
+                y = st.get("y")
+                if x is None or y is None:
+                    continue
+                min_x = min(min_x, float(x))
+                max_x = max(max_x, float(x))
+                min_y = min(min_y, float(y))
+                max_y = max(max_y, float(y))
+
         if min_x == float("inf"):
             min_x, max_x, min_y, max_y = 0.0, 1.0, 0.0, 1.0
 
@@ -513,6 +604,7 @@ class ReplayPositionTkGUI:
                 "max_y": float(max_y),
             },
             "player_timelines": [by_pid[k] for k in sorted(by_pid.keys())],
+            "entity_timelines": entity_timelines,
         }
 
     def _apply_cached_payload(self, payload: dict[str, Any]) -> None:
@@ -560,6 +652,30 @@ class ReplayPositionTkGUI:
             tl.death_windows = build_death_windows(tl.ticks, tl.states)
             timelines.append(tl)
         self.timelines = timelines
+        entities: list[WorldEntityTimeline] = []
+        for row in payload.get("entity_timelines", []):
+            entities.append(
+                WorldEntityTimeline(
+                    entity_id=int(row.get("entity_id", 0)),
+                    entity_name=str(row.get("entity_name", "")),
+                    class_name=str(row.get("class_name", "")),
+                    team=int(row.get("team", 0)),
+                    category=str(row.get("category", "other")),
+                    subtype=str(row.get("subtype", "other")),
+                    ticks=[int(x) for x in row.get("ticks", [])],
+                    states=[
+                        WorldEntityState(
+                            x=(None if s.get("x") is None else float(s["x"])),
+                            y=(None if s.get("y") is None else float(s["y"])),
+                            hp=int(s.get("hp", 0)),
+                            max_hp=int(s.get("max_hp", 0)),
+                            active=bool(s.get("active", False)),
+                        )
+                        for s in row.get("states", [])
+                    ],
+                )
+            )
+        self.entity_timelines = entities
 
     def _clear_cache_with_confirm(self) -> None:
         if self.dem_path is None or self.cache_path is None:
@@ -605,6 +721,12 @@ class ReplayPositionTkGUI:
             return None
         return tl.states[idx]
 
+    def _world_state_at_tick(self, tl: WorldEntityTimeline, tick: int) -> WorldEntityState | None:
+        idx = bisect.bisect_right(tl.ticks, tick) - 1
+        if idx < 0:
+            return None
+        return tl.states[idx]
+
     def _kills_at_tick(self, tl: PlayerTimeline, tick: int) -> int:
         return bisect.bisect_right(tl.kill_event_ticks, tick)
 
@@ -620,12 +742,110 @@ class ReplayPositionTkGUI:
                 return True, max(int(end_tick) - tick, 0)
         return False, 0
 
+    @staticmethod
+    def _entity_glyph(tl: WorldEntityTimeline) -> str:
+        if tl.category == "building":
+            if tl.subtype == "base":
+                return "基"
+            if tl.subtype == "tower":
+                return "塔"
+            if tl.subtype == "barracks":
+                return "营"
+            return "建"
+        if tl.category == "creep":
+            if tl.subtype == "melee":
+                return "近"
+            if tl.subtype == "ranged":
+                return "远"
+            if tl.subtype == "siege":
+                return "车"
+            if tl.subtype == "neutral":
+                return "野"
+            return "兵"
+        if tl.category == "lotus_pool":
+            return "莲"
+        if tl.category == "roshan":
+            return "肉"
+        if tl.category == "tormentor":
+            return "折"
+        return "?"
+
+    @staticmethod
+    def _entity_colors(tl: WorldEntityTimeline) -> tuple[str, str]:
+        if tl.category == "building":
+            if tl.subtype == "base":
+                return "#f9a825", "#fff3c4"
+            if tl.subtype == "tower":
+                return "#ef6c00", "#ffe0b2"
+            if tl.subtype == "barracks":
+                return "#8d6e63", "#d7ccc8"
+            return "#546e7a", "#cfd8dc"
+        if tl.category == "creep":
+            if tl.subtype == "melee":
+                return "#78909c", "#eceff1"
+            if tl.subtype == "ranged":
+                return "#26a69a", "#e0f2f1"
+            if tl.subtype == "siege":
+                return "#607d8b", "#cfd8dc"
+            if tl.subtype == "neutral":
+                return "#8e24aa", "#f3e5f5"
+            return "#5c6bc0", "#e8eaf6"
+        if tl.category == "lotus_pool":
+            return "#00acc1", "#e0f7fa"
+        if tl.category == "roshan":
+            return "#6d4c41", "#efebe9"
+        if tl.category == "tormentor":
+            return "#6a1b9a", "#f3e5f5"
+        return "#455a64", "#eceff1"
+
+    def _draw_world_entity(self, tl: WorldEntityTimeline, st: WorldEntityState) -> None:
+        if st.x is None or st.y is None or not st.active:
+            return
+        cx, cy = self._map_to_canvas(st.x, st.y)
+        fill, outline = self._entity_colors(tl)
+        glyph = self._entity_glyph(tl)
+        r = 9 if tl.category in ("roshan", "tormentor") else 7
+
+        if tl.category == "building" and tl.subtype == "tower":
+            points = [cx, cy - r, cx - r, cy + r, cx + r, cy + r]
+            self.canvas.create_polygon(points, fill=fill, outline=outline, width=1.2)
+        elif tl.category == "building" and tl.subtype == "barracks":
+            points = [cx, cy - r, cx - r, cy, cx, cy + r, cx + r, cy]
+            self.canvas.create_polygon(points, fill=fill, outline=outline, width=1.2)
+        elif tl.category == "creep" and tl.subtype == "siege":
+            self.canvas.create_rectangle(cx - r, cy - r * 0.7, cx + r, cy + r * 0.7, fill=fill, outline=outline, width=1.2)
+        else:
+            self.canvas.create_oval(cx - r, cy - r, cx + r, cy + r, fill=fill, outline=outline, width=1.2)
+
+        self.canvas.create_text(cx, cy, text=glyph, fill="#ffffff", font=("Arial", 8, "bold"))
+        if tl.category in ("lotus_pool", "roshan", "tormentor"):
+            self.canvas.create_text(
+                cx + 10,
+                cy - 2,
+                text=tl.entity_name.replace("npc_dota_", ""),
+                fill="#d9e4f0",
+                anchor="w",
+                font=("Arial", 8),
+            )
+
     def _render_map(self, tick: int) -> None:
         self.canvas.delete("all")
         width = max(self.canvas.winfo_width(), 200)
         height = max(self.canvas.winfo_height(), 200)
         self.canvas.create_rectangle(20, 20, width - 20, height - 20, outline="#666", width=2)
-        self.canvas.create_text(28, 12, text="地图（归一化坐标）", fill="#ccc", anchor="w")
+        self.canvas.create_text(
+            28,
+            12,
+            text="地图（归一化坐标） | 建筑: 基/塔/营/建 | 小兵: 近/远/车 | 野怪: 野 | 莲花池: 莲 | 肉山: 肉 | 折磨者: 折",
+            fill="#ccc",
+            anchor="w",
+        )
+
+        for etl in self.entity_timelines:
+            est = self._world_state_at_tick(etl, tick)
+            if est is None:
+                continue
+            self._draw_world_entity(etl, est)
 
         for tl in self.timelines:
             st = self._state_at_tick(tl, tick)
@@ -646,6 +866,14 @@ class ReplayPositionTkGUI:
                 anchor="w",
                 font=("Arial", 9),
             )
+        self.canvas.create_text(
+            30,
+            height - 12,
+            text="建筑: 基/塔/营/建 | 单位: 近/远/车/野 | 莲花池:莲 | 肉山:肉 | 折磨者:折",
+            fill="#9ea7b3",
+            anchor="w",
+            font=("Arial", 8),
+        )
 
     def _render_board(self, tick: int) -> None:
         metric = self.metric_var.get()
