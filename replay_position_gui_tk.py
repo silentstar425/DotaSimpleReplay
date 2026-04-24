@@ -20,11 +20,13 @@ from pathlib import Path
 from typing import Any
 import tkinter as tk
 from tkinter import ttk
+from tkinter import messagebox
 import time
 
 import gem
 from gem.extractors.players import PlayerExtractor
 from gem.parser import ReplayParser
+from replay_cache import cache_path_for_dem, delete_replay_cache, load_replay_cache, save_replay_cache
 
 
 @dataclass
@@ -179,6 +181,9 @@ class ReplayPositionTkGUI:
         self.current_tick_float = 0.0
         self.playback_anchor_real_s = 0.0
         self.playback_anchor_tick = 0.0
+        self.dem_path: Path | None = None
+        self.cache_path: Path | None = None
+        self.cache_hit = False
 
         self.root = tk.Tk()
         self.root.title("Dota2 回放增强 GUI（Tkinter 版）")
@@ -257,6 +262,8 @@ class ReplayPositionTkGUI:
         self.tick_label.pack(fill=tk.X)
         self.tickrate_label = tk.Label(top, text="tick_rate: -", fg="#9db3c8", bg="#0f1116", anchor="w")
         self.tickrate_label.pack(fill=tk.X)
+        self.cache_label = tk.Label(top, text="缓存: -", fg="#9db3c8", bg="#0f1116", anchor="w")
+        self.cache_label.pack(fill=tk.X)
 
         controls = tk.Frame(self.center_panel, bg="#0f1116")
         controls.pack(fill=tk.X, padx=10, pady=(0, 8))
@@ -271,6 +278,17 @@ class ReplayPositionTkGUI:
             command=self.toggle_play,
         )
         self.play_btn.pack(side=tk.LEFT, padx=(0, 10))
+
+        self.clear_cache_btn = tk.Button(
+            controls,
+            text="清理缓存",
+            width=10,
+            bg="#8b1e2d",
+            fg="#ffffff",
+            relief=tk.FLAT,
+            command=self._clear_cache_with_confirm,
+        )
+        self.clear_cache_btn.pack(side=tk.LEFT, padx=(0, 10))
 
         self.scale = tk.Scale(
             controls,
@@ -347,8 +365,42 @@ class ReplayPositionTkGUI:
     def _load_replay(self) -> None:
         print(f"[info] 读取回放: {self.replay_path}")
         dem_path = ensure_dem_path(self.replay_path)
+        self.dem_path = dem_path
+        self.cache_path = cache_path_for_dem(dem_path)
         print(f"[info] 解析 DEM: {dem_path}")
 
+        cached = load_replay_cache(dem_path)
+        if cached is not None:
+            payload = dict(cached)
+            self.cache_hit = True
+            print(f"[info] 命中缓存: {self.cache_path}")
+        else:
+            self.cache_hit = False
+            payload = self._build_payload_from_dem(dem_path)
+            save_replay_cache(dem_path, payload)
+            print(f"[info] 已写入缓存: {self.cache_path}")
+        self._apply_cached_payload(payload)
+        match_id = int(payload.get("match_id", 0))
+
+        self.file_label.config(text=f"文件: {dem_path} | match_id: {match_id}")
+        self.tickrate_label.config(
+            text=(
+                f"tick_rate={self.tick_rate:.2f}（每秒游戏 tick 数，通常接近 30；"
+                "它是游戏模拟频率，不是播放刷新率）"
+            )
+        )
+        self.cache_label.config(
+            text=f"缓存: {'命中' if self.cache_hit else '已生成'} | {self.cache_path}"
+        )
+        self.scale.config(from_=0, to=self.game_end_tick)
+        self._set_scale_value(0)
+
+        print(
+            f"[info] 回放范围: 0 -> {self.game_end_tick} (game_start_tick={self.game_start_tick}), "
+            f"tick_rate={self.tick_rate:.2f}, 玩家轨迹={len(self.timelines)}"
+        )
+
+    def _build_payload_from_dem(self, dem_path: Path) -> dict[str, Any]:
         match = gem.parse(str(dem_path))
         parser = ReplayParser(str(dem_path))
         # 使用逐 tick 采样，确保刷新率提升时有足够细粒度的数据可更新。
@@ -356,28 +408,24 @@ class ReplayPositionTkGUI:
         player_ext.attach(parser)
         parser.parse()
 
-        self.tick_rate = compute_tick_rate(match)
-        self.game_start_tick = int(match.game_start_tick)
-        self.game_end_tick = max(int(match.game_end_tick), int(parser.tick))
-        self.current_tick = 0
-        self.current_tick_float = 0.0
-
-        by_pid: dict[int, PlayerTimeline] = {}
+        by_pid: dict[int, dict[str, Any]] = {}
         hero_to_pid: dict[str, int] = {}
         for pp in match.players:
             pid = int(pp.player_id)
-            tl = PlayerTimeline(
-                player_id=pid,
-                player_name=str(pp.player_name or ""),
-                hero_name=str(pp.hero_name),
-                team=int(pp.team),
-                final_kills=int(pp.kills),
-                final_deaths=int(pp.deaths),
-                final_assists=int(pp.assists),
-            )
-            by_pid[pid] = tl
-            if tl.hero_name:
-                hero_to_pid[tl.hero_name.lower()] = pid
+            by_pid[pid] = {
+                "player_id": pid,
+                "player_name": str(pp.player_name or ""),
+                "hero_name": str(pp.hero_name),
+                "team": int(pp.team),
+                "final_kills": int(pp.kills),
+                "final_deaths": int(pp.deaths),
+                "final_assists": int(pp.assists),
+                "kill_event_ticks": [],
+                "ticks": [],
+                "states": [],
+            }
+            if pp.hero_name:
+                hero_to_pid[str(pp.hero_name).lower()] = pid
 
         for entry in match.combat_log:
             if (
@@ -388,60 +436,124 @@ class ReplayPositionTkGUI:
             ):
                 pid = hero_to_pid.get(entry.attacker_name.lower())
                 if pid is not None and pid in by_pid:
-                    by_pid[pid].kill_event_ticks.append(int(entry.tick))
+                    by_pid[pid]["kill_event_ticks"].append(int(entry.tick))
 
-        self.min_x = float("inf")
-        self.max_x = float("-inf")
-        self.min_y = float("inf")
-        self.max_y = float("-inf")
+        min_x = float("inf")
+        max_x = float("-inf")
+        min_y = float("inf")
+        max_y = float("-inf")
         for snap in player_ext.snapshots:
             pid = int(snap.player_id)
-            tl = by_pid.get(pid)
-            if tl is None:
+            slot = by_pid.get(pid)
+            if slot is None:
                 continue
-            state = HeroState(
-                x=None if snap.x is None else float(snap.x),
-                y=None if snap.y is None else float(snap.y),
-                hp=int(snap.hp),
-                max_hp=int(snap.max_hp),
-                mana=float(snap.mana),
-                max_mana=float(snap.max_mana),
-                level=int(snap.level),
-                net_worth=int(snap.net_worth),
-                lh=int(snap.lh),
-                dn=int(snap.dn),
-                total_deaths=int(snap.total_deaths),
+            state = {
+                "x": None if snap.x is None else float(snap.x),
+                "y": None if snap.y is None else float(snap.y),
+                "hp": int(snap.hp),
+                "max_hp": int(snap.max_hp),
+                "mana": float(snap.mana),
+                "max_mana": float(snap.max_mana),
+                "level": int(snap.level),
+                "net_worth": int(snap.net_worth),
+                "lh": int(snap.lh),
+                "dn": int(snap.dn),
+                "total_deaths": int(snap.total_deaths),
+            }
+            slot["ticks"].append(int(snap.tick))
+            slot["states"].append(state)
+            if state["x"] is not None and state["y"] is not None:
+                min_x = min(min_x, state["x"])
+                max_x = max(max_x, state["x"])
+                min_y = min(min_y, state["y"])
+                max_y = max(max_y, state["y"])
+
+        if min_x == float("inf"):
+            min_x, max_x, min_y, max_y = 0.0, 1.0, 0.0, 1.0
+
+        return {
+            "match_id": int(match.match_id),
+            "game_start_tick": int(match.game_start_tick),
+            "game_end_tick": max(int(match.game_end_tick), int(parser.tick)),
+            "tick_rate": compute_tick_rate(match),
+            "map_bounds": {
+                "min_x": float(min_x),
+                "max_x": float(max_x),
+                "min_y": float(min_y),
+                "max_y": float(max_y),
+            },
+            "player_timelines": [by_pid[k] for k in sorted(by_pid.keys())],
+        }
+
+    def _apply_cached_payload(self, payload: dict[str, Any]) -> None:
+        self.tick_rate = float(payload["tick_rate"])
+        self.game_start_tick = int(payload["game_start_tick"])
+        self.game_end_tick = int(payload["game_end_tick"])
+        self.current_tick = 0
+        self.current_tick_float = 0.0
+
+        bounds = payload.get("map_bounds", {})
+        self.min_x = float(bounds.get("min_x", 0.0))
+        self.max_x = float(bounds.get("max_x", 1.0))
+        self.min_y = float(bounds.get("min_y", 0.0))
+        self.max_y = float(bounds.get("max_y", 1.0))
+
+        timelines: list[PlayerTimeline] = []
+        for row in payload.get("player_timelines", []):
+            tl = PlayerTimeline(
+                player_id=int(row["player_id"]),
+                player_name=str(row.get("player_name", "")),
+                hero_name=str(row.get("hero_name", "")),
+                team=int(row.get("team", 0)),
+                final_kills=int(row.get("final_kills", 0)),
+                final_deaths=int(row.get("final_deaths", 0)),
+                final_assists=int(row.get("final_assists", 0)),
+                kill_event_ticks=[int(x) for x in row.get("kill_event_ticks", [])],
+                ticks=[int(x) for x in row.get("ticks", [])],
+                states=[
+                    HeroState(
+                        x=(None if s.get("x") is None else float(s["x"])),
+                        y=(None if s.get("y") is None else float(s["y"])),
+                        hp=int(s.get("hp", 0)),
+                        max_hp=int(s.get("max_hp", 0)),
+                        mana=float(s.get("mana", 0.0)),
+                        max_mana=float(s.get("max_mana", 0.0)),
+                        level=int(s.get("level", 0)),
+                        net_worth=int(s.get("net_worth", 0)),
+                        lh=int(s.get("lh", 0)),
+                        dn=int(s.get("dn", 0)),
+                        total_deaths=int(s.get("total_deaths", 0)),
+                    )
+                    for s in row.get("states", [])
+                ],
             )
-            tl.ticks.append(int(snap.tick))
-            tl.states.append(state)
-            if state.x is not None and state.y is not None:
-                self.min_x = min(self.min_x, state.x)
-                self.max_x = max(self.max_x, state.x)
-                self.min_y = min(self.min_y, state.y)
-                self.max_y = max(self.max_y, state.y)
-
-        if self.min_x == float("inf"):
-            self.min_x, self.max_x, self.min_y, self.max_y = 0.0, 1.0, 0.0, 1.0
-
-        self.timelines = [by_pid[k] for k in sorted(by_pid.keys())]
-        for tl in self.timelines:
-            tl.kill_event_ticks.sort()
             tl.death_windows = build_death_windows(tl.ticks, tl.states)
+            timelines.append(tl)
+        self.timelines = timelines
 
-        self.file_label.config(text=f"文件: {dem_path} | match_id: {int(match.match_id)}")
-        self.tickrate_label.config(
-            text=(
-                f"tick_rate={self.tick_rate:.2f}（每秒游戏 tick 数，通常接近 30；"
-                "它是游戏模拟频率，不是播放刷新率）"
-            )
+    def _clear_cache_with_confirm(self) -> None:
+        if self.dem_path is None or self.cache_path is None:
+            messagebox.showinfo("清理缓存", "当前录像未就绪，无法清理缓存。")
+            return
+        ok1 = messagebox.askyesno(
+            "清理缓存",
+            "确定要删除当前录像的缓存文件吗？该操作不可撤销。",
         )
-        self.scale.config(from_=0, to=self.game_end_tick)
-        self._set_scale_value(0)
-
-        print(
-            f"[info] 回放范围: 0 -> {self.game_end_tick} (game_start_tick={self.game_start_tick}), "
-            f"tick_rate={self.tick_rate:.2f}, 玩家轨迹={len(self.timelines)}"
+        if not ok1:
+            return
+        ok2 = messagebox.askyesno(
+            "二次确认",
+            "请再次确认：删除后下次将重新解析录像，可能较慢。是否继续？",
         )
+        if not ok2:
+            return
+        deleted = delete_replay_cache(self.dem_path)
+        if deleted:
+            self.cache_hit = False
+            self.cache_label.config(text=f"缓存: 已清理 | {self.cache_path}")
+            messagebox.showinfo("清理缓存", f"缓存已删除：{self.cache_path}")
+        else:
+            messagebox.showinfo("清理缓存", f"未删除缓存（可能不存在）：{self.cache_path}")
 
     def _set_scale_value(self, tick: int) -> None:
         self._suppress_scale_callback = True

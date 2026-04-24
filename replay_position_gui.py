@@ -23,6 +23,7 @@ from typing import Any
 import gem
 from gem.extractors.players import PlayerExtractor
 from gem.parser import ReplayParser
+from replay_cache import cache_path_for_dem, delete_replay_cache, load_replay_cache, save_replay_cache
 
 
 HTML_TEMPLATE = """<!doctype html>
@@ -160,6 +161,7 @@ HTML_TEMPLATE = """<!doctype html>
       <div class="meta" id="tickRateLine"></div>
       <div class="controls">
         <button id="playBtn">播放</button>
+        <button id="clearCacheBtn" style="background:#8b1e2d;">清理缓存</button>
         <input id="slider" type="range" min="0" max="1" step="1" value="0" />
         <label for="fpsInput" class="small-muted">刷新率(FPS)</label>
         <input id="fpsInput" type="number" min="1" max="240" step="1" value="30" style="width: 84px;" />
@@ -255,6 +257,7 @@ HTML_TEMPLATE = """<!doctype html>
     const tickRateLine = document.getElementById("tickRateLine");
     const playBtn = document.getElementById("playBtn");
     const slider = document.getElementById("slider");
+    const clearCacheBtn = document.getElementById("clearCacheBtn");
     const boardMetric = document.getElementById("boardMetric");
     const boardList = document.getElementById("boardList");
     const statusList = document.getElementById("statusList");
@@ -384,6 +387,12 @@ HTML_TEMPLATE = """<!doctype html>
       renderStatus(tick);
     };
 
+    const refreshTickRateMeta = () => {
+      const cacheText = data.cache_hit ? "缓存命中" : "缓存已生成";
+      tickRateLine.textContent =
+        `tick_rate=${data.tick_rate.toFixed(2)}（每秒游戏 tick 数，通常接近 30；它描述游戏模拟频率，不是播放刷新率） | ${cacheText} | ${data.cache_path || ""}`;
+    };
+
     const renderFromFloat = (tickFloat) => {
       const clamped = Math.max(0, Math.min(data.game_end_tick, tickFloat));
       currentTickFloat = clamped;
@@ -449,11 +458,32 @@ HTML_TEMPLATE = """<!doctype html>
       }
     });
 
+    clearCacheBtn.addEventListener("click", async () => {
+      if (!data) return;
+      const ok = confirm("确定要删除当前录像的缓存文件吗？该操作不可撤销。");
+      if (!ok) return;
+      const ok2 = confirm("请再次确认：删除后下次将重新解析录像，可能较慢。是否继续？");
+      if (!ok2) return;
+      try {
+        const res = await fetch("/clear_cache", { method: "POST" });
+        const obj = await res.json();
+        if (obj && obj.deleted) {
+          data.cache_hit = false;
+          alert(`缓存已删除：${obj.cache_path}`);
+          refreshTickRateMeta();
+        } else {
+          alert(`未删除缓存（可能不存在）：${obj && obj.cache_path ? obj.cache_path : "unknown"}`);
+        }
+      } catch (err) {
+        alert(`清理缓存失败：${String(err)}`);
+      }
+    });
+
     (async () => {
       const res = await fetch("/data");
       data = await res.json();
       fileLine.textContent = `文件: ${data.dem_path} | match_id: ${data.match_id}`;
-      tickRateLine.textContent = `tick_rate=${data.tick_rate.toFixed(2)}（每秒游戏 tick 数，通常接近 30；它描述游戏模拟频率，不是播放刷新率）`;
+      refreshTickRateMeta();
       slider.min = "0";
       slider.max = String(data.game_end_tick);
       slider.value = "0";
@@ -559,10 +589,21 @@ def _build_death_windows(ticks: list[int], states: list[dict[str, Any]]) -> list
     return windows
 
 
-def build_gui_payload(replay_path: Path, playback_fps: int) -> dict[str, Any]:
+def build_gui_payload(replay_path: Path, playback_fps: int) -> tuple[dict[str, Any], Path]:
     print(f"[info] 读取回放: {replay_path}")
     dem_path = ensure_dem_path(replay_path)
     print(f"[info] 解析 DEM: {dem_path}")
+
+    cache_path = cache_path_for_dem(dem_path)
+    cached = load_replay_cache(dem_path)
+    if cached is not None:
+        payload = dict(cached)
+        payload["playback_fps"] = int(max(playback_fps, 1))
+        payload["cache_enabled"] = True
+        payload["cache_hit"] = True
+        payload["cache_path"] = str(cache_path)
+        print(f"[info] 命中缓存: {cache_path}")
+        return payload, dem_path
 
     match = gem.parse(str(dem_path))
     parser, player_ext = _parse_player_snapshots(dem_path)
@@ -659,15 +700,22 @@ def build_gui_payload(replay_path: Path, playback_fps: int) -> dict[str, Any]:
         },
         "player_timelines": [player_timelines[k] for k in sorted(player_timelines.keys())],
     }
+    save_replay_cache(dem_path, payload)
+    payload["cache_enabled"] = True
+    payload["cache_hit"] = False
+    payload["cache_path"] = str(cache_path)
+    print(f"[info] 已写入缓存: {cache_path}")
     print(
         f"[info] 回放范围: 0 -> {payload['game_end_tick']} (game_start_tick={payload['game_start_tick']}), "
         f"tick_rate={payload['tick_rate']:.2f}, 玩家轨迹={len(payload['player_timelines'])}"
     )
-    return payload
+    return payload, dem_path
 
 
-def run_server(host: str, port: int, payload: dict[str, Any], open_browser: bool) -> None:
-    payload_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+def run_server(host: str, port: int, payload: dict[str, Any], dem_path: Path, open_browser: bool) -> None:
+    def current_payload_bytes() -> bytes:
+        return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
     html_bytes = HTML_TEMPLATE.encode("utf-8")
 
     class Handler(BaseHTTPRequestHandler):
@@ -680,11 +728,33 @@ def run_server(host: str, port: int, payload: dict[str, Any], open_browser: bool
                 self.wfile.write(html_bytes)
                 return
             if self.path == "/data":
+                payload_bytes = current_payload_bytes()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Content-Length", str(len(payload_bytes)))
                 self.end_headers()
                 self.wfile.write(payload_bytes)
+                return
+            self.send_response(404)
+            self.end_headers()
+
+        def do_POST(self) -> None:  # noqa: N802
+            if self.path == "/clear_cache":
+                deleted = delete_replay_cache(dem_path)
+                if deleted:
+                    payload["cache_hit"] = False
+                body = json.dumps(
+                    {
+                        "deleted": bool(deleted),
+                        "cache_path": str(cache_path_for_dem(dem_path)),
+                    },
+                    ensure_ascii=False,
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
                 return
             self.send_response(404)
             self.end_headers()
@@ -708,7 +778,7 @@ def run_server(host: str, port: int, payload: dict[str, Any], open_browser: bool
 def main() -> None:
     args = parse_args()
     replay_path = resolve_input_path(args.input_replay)
-    payload = build_gui_payload(replay_path, playback_fps=args.fps)
+    payload, dem_path = build_gui_payload(replay_path, playback_fps=args.fps)
 
     if args.export_json:
         out = Path(args.export_json).expanduser().resolve()
@@ -718,7 +788,7 @@ def main() -> None:
 
     if args.no_server:
         return
-    run_server(args.host, args.port, payload, open_browser=not args.no_open_browser)
+    run_server(args.host, args.port, payload, dem_path, open_browser=not args.no_open_browser)
 
 
 if __name__ == "__main__":

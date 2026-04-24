@@ -130,6 +130,8 @@ python3 replay_position_gui.py replay.dem --fps 30
 - `tick_rate` 表示“每秒游戏模拟 tick 数”（数据时间轴频率，通常接近 30），不是 UI 的绘制刷新率。
 - GUI 播放刷新率由 `FPS` 控制，定义为：**游戏时间每过 1 秒，界面重绘多少次**。
 - 调整 `FPS` 不会改变游戏时间推进速度（仍按 1x 实时推进），只会改变每秒更新次数与观感流畅度。
+- 已增加解析缓存：首次解析会将播放必要数据写入缓存文件（`.replay_cache/*.pkl`），后续播放同一录像优先读取缓存以提速。
+- GUI 提供“清理缓存”按钮，删除当前录像对应缓存前会进行二次确认。
 
 ## Tkinter 版 GUI 回放（英雄位置）
 
@@ -168,6 +170,7 @@ python3 replay_position_gui_tk.py replay.dem --fps 30
 
 - Tkinter 版本依赖本地 Python 的 `tkinter` 模块（通常由系统包 `python3-tk` 提供）。
 - 按你的要求，该版本代码已开发完成，但不在云端环境执行测试。
+- Tkinter 版同样支持解析缓存与“清理缓存（二次确认）”。
 
 ## 测试回放文件
 
