@@ -197,14 +197,14 @@ class ReplayPositionTkGUI:
         container = tk.Frame(self.root, bg="#0f1116")
         container.pack(fill=tk.BOTH, expand=True)
 
-        self.left_panel = tk.Frame(container, bg="#161b22", width=290)
+        self.left_panel = tk.Frame(container, bg="#161b22", width=261)
         self.left_panel.pack(side=tk.LEFT, fill=tk.Y)
         self.left_panel.pack_propagate(False)
 
         self.center_panel = tk.Frame(container, bg="#0f1116")
         self.center_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        self.right_panel = tk.Frame(container, bg="#161b22", width=340)
+        self.right_panel = tk.Frame(container, bg="#161b22", width=306)
         self.right_panel.pack(side=tk.LEFT, fill=tk.Y)
         self.right_panel.pack_propagate(False)
 
@@ -218,7 +218,7 @@ class ReplayPositionTkGUI:
             text="玩家看板",
             fg="#e8e8e8",
             bg="#161b22",
-            font=("Arial", 13, "bold"),
+            font=("Arial", 12, "bold"),
             anchor="w",
         ).pack(fill=tk.X, padx=10, pady=(10, 6))
 
@@ -227,7 +227,7 @@ class ReplayPositionTkGUI:
             text="排序指标",
             fg="#a8b2bf",
             bg="#161b22",
-            font=("Arial", 10),
+            font=("Arial", 9),
             anchor="w",
         ).pack(fill=tk.X, padx=10, pady=(0, 4))
 
@@ -248,47 +248,41 @@ class ReplayPositionTkGUI:
             selectbackground="#2d6cdf",
             borderwidth=0,
             highlightthickness=0,
-            font=("Consolas", 11),
+            font=("Consolas", 10),
         )
         self.board_list.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
 
     def _build_center_panel(self) -> None:
         top = tk.Frame(self.center_panel, bg="#0f1116")
-        top.pack(fill=tk.X, padx=10, pady=8)
+        top.pack(fill=tk.X, padx=9, pady=7)
 
-        self.file_label = tk.Label(top, text="文件: -", fg="#d7d7d7", bg="#0f1116", anchor="w")
-        self.file_label.pack(fill=tk.X)
         self.tick_label = tk.Label(top, text="Tick: -", fg="#f2f2f2", bg="#0f1116", anchor="w")
         self.tick_label.pack(fill=tk.X)
-        self.tickrate_label = tk.Label(top, text="tick_rate: -", fg="#9db3c8", bg="#0f1116", anchor="w")
-        self.tickrate_label.pack(fill=tk.X)
-        self.cache_label = tk.Label(top, text="缓存: -", fg="#9db3c8", bg="#0f1116", anchor="w")
-        self.cache_label.pack(fill=tk.X)
 
         controls = tk.Frame(self.center_panel, bg="#0f1116")
-        controls.pack(fill=tk.X, padx=10, pady=(0, 8))
+        controls.pack(fill=tk.X, padx=9, pady=(0, 7))
 
         self.play_btn = tk.Button(
             controls,
             text="播放",
-            width=10,
+            width=9,
             bg="#2d6cdf",
             fg="#ffffff",
             relief=tk.FLAT,
             command=self.toggle_play,
         )
-        self.play_btn.pack(side=tk.LEFT, padx=(0, 10))
+        self.play_btn.pack(side=tk.LEFT, padx=(0, 9))
 
         self.clear_cache_btn = tk.Button(
             controls,
             text="清理缓存",
-            width=10,
+            width=9,
             bg="#8b1e2d",
             fg="#ffffff",
             relief=tk.FLAT,
             command=self._clear_cache_with_confirm,
         )
-        self.clear_cache_btn.pack(side=tk.LEFT, padx=(0, 10))
+        self.clear_cache_btn.pack(side=tk.LEFT, padx=(0, 9))
 
         self.scale = tk.Scale(
             controls,
@@ -305,14 +299,14 @@ class ReplayPositionTkGUI:
         )
         self.scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        tk.Label(controls, text="刷新率(FPS)", fg="#9fb0c1", bg="#0f1116").pack(side=tk.LEFT, padx=(10, 6))
+        tk.Label(controls, text="刷新率(FPS)", fg="#9fb0c1", bg="#0f1116").pack(side=tk.LEFT, padx=(9, 5))
         self.fps_var = tk.StringVar(value=str(self.default_fps))
         self.fps_spin = tk.Spinbox(
             controls,
             from_=1,
             to=240,
             increment=1,
-            width=6,
+            width=5,
             textvariable=self.fps_var,
             command=self._on_fps_change,
             bg="#11161d",
@@ -327,7 +321,7 @@ class ReplayPositionTkGUI:
             highlightthickness=1,
             highlightbackground="#414a56",
         )
-        self.canvas.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 6))
+        self.canvas.pack(fill=tk.BOTH, expand=True, padx=9, pady=(0, 5))
 
         tk.Label(
             self.center_panel,
@@ -335,7 +329,7 @@ class ReplayPositionTkGUI:
             fg="#9ea7b3",
             bg="#0f1116",
             anchor="w",
-        ).pack(fill=tk.X, padx=10, pady=(0, 10))
+        ).pack(fill=tk.X, padx=9, pady=(0, 9))
 
     def _build_right_panel(self) -> None:
         tk.Label(
@@ -343,7 +337,7 @@ class ReplayPositionTkGUI:
             text="英雄状态",
             fg="#e8e8e8",
             bg="#161b22",
-            font=("Arial", 13, "bold"),
+            font=("Arial", 12, "bold"),
             anchor="w",
         ).pack(fill=tk.X, padx=10, pady=(10, 4))
 
@@ -360,7 +354,7 @@ class ReplayPositionTkGUI:
             bg="#10151b",
             highlightthickness=0,
         )
-        self.status_canvas.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+        self.status_canvas.pack(fill=tk.BOTH, expand=True, padx=9, pady=(0, 9))
 
     def _load_replay(self) -> None:
         print(f"[info] 读取回放: {self.replay_path}")
@@ -382,16 +376,6 @@ class ReplayPositionTkGUI:
         self._apply_cached_payload(payload)
         match_id = int(payload.get("match_id", 0))
 
-        self.file_label.config(text=f"文件: {dem_path} | match_id: {match_id}")
-        self.tickrate_label.config(
-            text=(
-                f"tick_rate={self.tick_rate:.2f}（每秒游戏 tick 数，通常接近 30；"
-                "它是游戏模拟频率，不是播放刷新率）"
-            )
-        )
-        self.cache_label.config(
-            text=f"缓存: {'命中' if self.cache_hit else '已生成'} | {self.cache_path}"
-        )
         self.scale.config(from_=0, to=self.game_end_tick)
         self._set_scale_value(0)
 
@@ -550,7 +534,6 @@ class ReplayPositionTkGUI:
         deleted = delete_replay_cache(self.dem_path)
         if deleted:
             self.cache_hit = False
-            self.cache_label.config(text=f"缓存: 已清理 | {self.cache_path}")
             messagebox.showinfo("清理缓存", f"缓存已删除：{self.cache_path}")
         else:
             messagebox.showinfo("清理缓存", f"未删除缓存（可能不存在）：{self.cache_path}")
@@ -652,47 +635,39 @@ class ReplayPositionTkGUI:
 
     def _render_status(self, tick: int) -> None:
         self.status_canvas.delete("all")
-        row_h = 64
-        self.status_canvas.configure(scrollregion=(0, 0, 320, row_h * len(self.timelines) + 20))
+        row_h = 58
+        self.status_canvas.configure(scrollregion=(0, 0, 290, row_h * len(self.timelines) + 18))
 
         for idx, tl in enumerate(sorted(self.timelines, key=lambda x: (x.team, x.player_id))):
-            y = 16 + idx * row_h
+            y = 14 + idx * row_h
             st = self._state_at_tick(tl, tick)
             if st is None:
                 st = HeroState(None, None, 0, 0, 0.0, 0.0, 0, 0, 0, 0, 0)
             is_dead, remain_ticks = self._death_info_at_tick(tl, tick)
             remain_sec = "?" if remain_ticks is None else f"{remain_ticks / self.tick_rate:.1f}"
 
-            self.status_canvas.create_rectangle(0, y - 10, 320, y + 48, fill="#10151b", outline="#232a33")
-            self.status_canvas.create_oval(10, y, 46, y + 36, fill="#2f3946", outline="#6b7786")
-            self.status_canvas.create_text(28, y + 18, text=avatar_text(tl.hero_name), fill="#fff", font=("Arial", 9, "bold"))
+            self.status_canvas.create_rectangle(0, y - 9, 290, y + 44, fill="#10151b", outline="#232a33")
+            self.status_canvas.create_oval(9, y, 41, y + 32, fill="#2f3946", outline="#6b7786")
             if is_dead:
-                self.status_canvas.create_rectangle(38, y + 26, 74, y + 40, fill="#f44336", outline="#fff")
-                self.status_canvas.create_text(56, y + 33, text=f"{remain_sec}s", fill="#fff", font=("Arial", 8, "bold"))
+                self.status_canvas.create_oval(9, y, 41, y + 32, fill="#b52323", outline="#ffffff")
+                self.status_canvas.create_text(25, y + 16, text=f"{remain_sec}s", fill="#fff", font=("Arial", 8, "bold"))
+            else:
+                self.status_canvas.create_text(25, y + 16, text=avatar_text(tl.hero_name), fill="#fff", font=("Arial", 8, "bold"))
 
-            name = tl.player_name or short_hero_name(tl.hero_name)
+            hero = short_hero_name(tl.hero_name)
+            name = tl.player_name or hero
+            if is_dead:
+                title_color = "#ff9a9a"
+            else:
+                title_color = "#e8e8e8"
+            self.status_canvas.create_text(49, y + 8, text=f"{hero} ({name})", fill=title_color, anchor="w", font=("Arial", 9, "bold"))
             self.status_canvas.create_text(
-                56, y + 8,
-                text=f"{name} ({short_hero_name(tl.hero_name)})",
-                fill="#e8e8e8",
-                anchor="w",
-                font=("Arial", 10, "bold"),
-            )
-            self.status_canvas.create_text(
-                56, y + 24,
+                49, y + 22,
                 text=f"HP {max(st.hp, 0)}/{max(st.max_hp, 0)}   MP {max(int(st.mana), 0)}/{max(int(st.max_mana), 0)}",
                 fill="#9cd7ff",
                 anchor="w",
-                font=("Arial", 9),
+                font=("Arial", 8),
             )
-            if is_dead:
-                self.status_canvas.create_text(
-                    56, y + 38,
-                    text=f"死亡中 · 复活剩余 {remain_sec}s",
-                    fill="#ff8e8e",
-                    anchor="w",
-                    font=("Arial", 9),
-                )
 
     def _render_tick(self, tick: int) -> None:
         tick = max(0, min(self.game_end_tick, int(tick)))

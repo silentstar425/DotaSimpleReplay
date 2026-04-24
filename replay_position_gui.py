@@ -36,38 +36,38 @@ HTML_TEMPLATE = """<!doctype html>
     body { margin: 0; background: #0f1116; color: #e8e8e8; font-family: Arial, sans-serif; }
     .app { display: flex; height: 100vh; overflow: hidden; }
     .side {
-      width: 300px;
+      width: 270px;
       background: #161b22;
       border-right: 1px solid #2b313a;
       display: flex;
       flex-direction: column;
-      padding: 12px;
+      padding: 10px;
       box-sizing: border-box;
     }
     .side.right {
       border-right: none;
       border-left: 1px solid #2b313a;
-      width: 340px;
+      width: 306px;
     }
-    .side h3 { margin: 0 0 12px; font-size: 16px; }
+    .side h3 { margin: 0 0 10px; font-size: 14px; }
     .center {
       flex: 1;
       min-width: 0;
       display: flex;
       flex-direction: column;
-      padding: 12px;
+      padding: 10px;
       box-sizing: border-box;
-      gap: 10px;
+      gap: 9px;
     }
-    .meta { font-size: 13px; color: #c8c8c8; }
+    .meta { font-size: 12px; color: #c8c8c8; }
     .meta strong { color: #ffffff; }
-    .controls { display: flex; align-items: center; gap: 10px; }
+    .controls { display: flex; align-items: center; gap: 9px; }
     button {
       background: #2d6cdf;
       color: #fff;
       border: none;
       border-radius: 5px;
-      padding: 8px 14px;
+      padding: 7px 12px;
       cursor: pointer;
     }
     button:hover { background: #3a77e7; }
@@ -77,67 +77,68 @@ HTML_TEMPLATE = """<!doctype html>
       color: #e8e8e8;
       border: 1px solid #2f3946;
       border-radius: 4px;
-      padding: 6px 8px;
-      font-size: 13px;
+      padding: 5px 7px;
+      font-size: 12px;
     }
     #mapCanvas {
       width: 100%;
-      height: calc(100vh - 160px);
-      min-height: 560px;
+      height: calc(100vh - 144px);
+      min-height: 504px;
       background: #111;
       border: 1px solid #414a56;
       border-radius: 8px;
     }
-    .legend { font-size: 12px; color: #9ea7b3; }
+    .legend { font-size: 11px; color: #9ea7b3; }
     .scroll { overflow: auto; min-height: 0; }
     .board-row {
       display: grid;
       grid-template-columns: 1fr auto;
-      gap: 8px;
-      padding: 8px;
+      gap: 7px;
+      padding: 7px;
       border-bottom: 1px solid #232a33;
-      font-size: 13px;
+      font-size: 12px;
     }
     .board-row .name { color: #f5f5f5; }
     .board-row .val { color: #8fd3ff; font-weight: bold; }
     .status-row {
       display: grid;
-      grid-template-columns: 46px 1fr;
-      gap: 10px;
+      grid-template-columns: 42px 1fr;
+      gap: 9px;
       border-bottom: 1px solid #232a33;
-      padding: 9px 6px;
+      padding: 8px 5px;
       align-items: center;
-      font-size: 13px;
+      font-size: 12px;
     }
     .avatar {
-      width: 38px;
-      height: 38px;
+      width: 34px;
+      height: 34px;
       border-radius: 999px;
       background: #2f3946;
       display: flex;
       align-items: center;
       justify-content: center;
       color: #fff;
-      font-size: 12px;
+      font-size: 11px;
       position: relative;
       border: 1px solid #606c7d;
     }
     .respawn-badge {
       position: absolute;
-      right: -6px;
-      bottom: -6px;
+      right: 1px;
+      bottom: 1px;
       background: #f44336;
       color: #fff;
       border-radius: 999px;
-      padding: 1px 5px;
-      font-size: 10px;
-      border: 1px solid #fff;
+      padding: 0 4px;
+      font-size: 11px;
+      font-weight: bold;
+      border: 1px solid #ffd5d5;
       white-space: nowrap;
     }
     .hp { color: #7CFC8C; }
     .mp { color: #7BB5FF; }
     .dead { color: #ff7d7d; }
-    .small-muted { color: #9ba7b6; font-size: 12px; }
+    .small-muted { color: #9ba7b6; font-size: 11px; }
   </style>
 </head>
 <body>
@@ -156,15 +157,14 @@ HTML_TEMPLATE = """<!doctype html>
     </aside>
 
     <main class="center">
-      <div class="meta" id="fileLine"></div>
+      <div class="meta" id="titleLine">Dota2 回放可视化</div>
       <div class="meta" id="tickLine"></div>
-      <div class="meta" id="tickRateLine"></div>
       <div class="controls">
         <button id="playBtn">播放</button>
         <button id="clearCacheBtn" style="background:#8b1e2d;">清理缓存</button>
         <input id="slider" type="range" min="0" max="1" step="1" value="0" />
         <label for="fpsInput" class="small-muted">刷新率(FPS)</label>
-        <input id="fpsInput" type="number" min="1" max="240" step="1" value="30" style="width: 84px;" />
+        <input id="fpsInput" type="number" min="1" max="240" step="1" value="30" style="width: 76px;" />
       </div>
       <canvas id="mapCanvas" width="1200" height="780"></canvas>
       <div class="legend">绿色：天辉（team=2） | 红色：夜魇（team=3） | 死亡英雄不会显示在地图上</div>
@@ -252,9 +252,8 @@ HTML_TEMPLATE = """<!doctype html>
       total_deaths: 0,
     });
 
-    const fileLine = document.getElementById("fileLine");
+    const titleLine = document.getElementById("titleLine");
     const tickLine = document.getElementById("tickLine");
-    const tickRateLine = document.getElementById("tickRateLine");
     const playBtn = document.getElementById("playBtn");
     const slider = document.getElementById("slider");
     const clearCacheBtn = document.getElementById("clearCacheBtn");
@@ -338,7 +337,7 @@ HTML_TEMPLATE = """<!doctype html>
       rows.sort((a, b) => b.sortValue - a.sortValue || a.hero.localeCompare(b.hero));
       boardList.innerHTML = rows.map((row) => `
         <div class="board-row">
-          <div class="name">${row.name}<div class="small-muted">${row.hero}</div></div>
+          <div class="name">${row.hero}<div class="small-muted">(${row.name})</div></div>
           <div class="val">${row.valueText}</div>
         </div>
       `).join("");
@@ -356,8 +355,7 @@ HTML_TEMPLATE = """<!doctype html>
         const hpText = `${Math.max(0, Math.round(st.hp || 0))}/${Math.max(0, Math.round(st.max_hp || 0))}`;
         const manaText = `${Math.max(0, Math.round(st.mana || 0))}/${Math.max(0, Math.round(st.max_mana || 0))}`;
         const respawnSec = death.remaining_ticks === null ? "?" : (death.remaining_ticks / data.tick_rate).toFixed(1);
-        const respawnBadge = death.is_dead ? `<span class="respawn-badge">${respawnSec}s</span>` : "";
-        const deathLine = death.is_dead ? `<div class="dead">死亡中 · 复活剩余 ${respawnSec}s</div>` : "";
+        const respawnBadge = death.is_dead ? `<span class="respawn-badge">${respawnSec}</span>` : "";
         return `
           <div class="status-row">
             <div class="avatar">
@@ -365,10 +363,9 @@ HTML_TEMPLATE = """<!doctype html>
               ${respawnBadge}
             </div>
             <div>
-              <div><strong>${timeline.player_name || shortHeroName(timeline.hero_name)}</strong> <span class="small-muted">(${shortHeroName(timeline.hero_name)})</span></div>
+              <div><strong>${shortHeroName(timeline.hero_name)}</strong> <span class="small-muted">(${timeline.player_name || shortHeroName(timeline.hero_name)})</span></div>
               <div class="hp">HP: ${hpText}</div>
               <div class="mp">MP: ${manaText}</div>
-              ${deathLine}
             </div>
           </div>
         `;
@@ -385,12 +382,6 @@ HTML_TEMPLATE = """<!doctype html>
       renderMap(tick);
       renderBoard(tick);
       renderStatus(tick);
-    };
-
-    const refreshTickRateMeta = () => {
-      const cacheText = data.cache_hit ? "缓存命中" : "缓存已生成";
-      tickRateLine.textContent =
-        `tick_rate=${data.tick_rate.toFixed(2)}（每秒游戏 tick 数，通常接近 30；它描述游戏模拟频率，不是播放刷新率） | ${cacheText} | ${data.cache_path || ""}`;
     };
 
     const renderFromFloat = (tickFloat) => {
@@ -470,7 +461,6 @@ HTML_TEMPLATE = """<!doctype html>
         if (obj && obj.deleted) {
           data.cache_hit = false;
           alert(`缓存已删除：${obj.cache_path}`);
-          refreshTickRateMeta();
         } else {
           alert(`未删除缓存（可能不存在）：${obj && obj.cache_path ? obj.cache_path : "unknown"}`);
         }
@@ -482,8 +472,7 @@ HTML_TEMPLATE = """<!doctype html>
     (async () => {
       const res = await fetch("/data");
       data = await res.json();
-      fileLine.textContent = `文件: ${data.dem_path} | match_id: ${data.match_id}`;
-      refreshTickRateMeta();
+      titleLine.textContent = "Dota2 回放可视化";
       slider.min = "0";
       slider.max = String(data.game_end_tick);
       slider.value = "0";
