@@ -63,7 +63,7 @@ HTML_TEMPLATE = """<!doctype html>
     }
     .meta { font-size: 12px; color: #c8c8c8; }
     .meta strong { color: #ffffff; }
-    .controls { display: flex; align-items: center; gap: 9px; }
+    .controls { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
     button {
       background: #2d6cdf;
       color: #fff;
@@ -84,8 +84,11 @@ HTML_TEMPLATE = """<!doctype html>
     }
     #mapCanvas {
       width: 100%;
-      height: calc(100vh - 144px);
-      min-height: 504px;
+      height: auto;
+      aspect-ratio: 1 / 1;
+      max-height: calc(100vh - 144px);
+      display: block;
+      margin: 0 auto;
       background: #111;
       border: 1px solid #414a56;
       border-radius: 8px;
@@ -95,8 +98,8 @@ HTML_TEMPLATE = """<!doctype html>
     .board-row {
       display: grid;
       grid-template-columns: 1fr auto;
-      gap: 7px;
-      padding: 7px;
+      gap: 2px;
+      padding: 2px;
       border-bottom: 1px solid #232a33;
       font-size: 12px;
     }
@@ -199,9 +202,11 @@ HTML_TEMPLATE = """<!doctype html>
       const ss = absVal - mm * 60;
       return `${sign}${String(mm).padStart(2, "0")}:${ss.toFixed(2).padStart(5, "0")}`;
     };
+    const mapFramePad = 10;
+    const mapCoordPad = 16;
 
     const mapToCanvas = (x, y, bounds, canvas) => {
-      const pad = 40;
+      const pad = mapCoordPad;
       const nx = bounds.max_x === bounds.min_x ? 0 : (x - bounds.min_x) / (bounds.max_x - bounds.min_x);
       const ny = bounds.max_y === bounds.min_y ? 0 : (y - bounds.min_y) / (bounds.max_y - bounds.min_y);
       const cx = pad + nx * (canvas.width - 2 * pad);
@@ -372,6 +377,13 @@ HTML_TEMPLATE = """<!doctype html>
     const fpsInput = document.getElementById("fpsInput");
     const canvas = document.getElementById("mapCanvas");
     const ctx = canvas.getContext("2d");
+    const mapFrameRatio = 1;
+    const mapCropConfig = {
+      loadWidth: 1045,  // 载入宽度（裁剪框宽）
+      loadHeight: 1070, // 载入高度（裁剪框高）
+      offsetX: 69,      // 横偏移：裁剪框左下角到原图左下角的 x 距离
+      offsetY: 65,      // 纵偏移：裁剪框左下角到原图左下角的 y 距离
+    };
 
     let data = null;
     let playing = false;
@@ -380,16 +392,78 @@ HTML_TEMPLATE = """<!doctype html>
     let currentTickFloat = 0;
     let playbackAnchorRealMs = 0;
     let playbackAnchorTick = 0;
+    const mapBackgroundImage = new Image();
+    let mapBackgroundLoaded = false;
+    mapBackgroundImage.onload = () => { mapBackgroundLoaded = true; };
+    mapBackgroundImage.onerror = () => { mapBackgroundLoaded = false; };
+    mapBackgroundImage.src = "/assets/maps/map_full.png";
+
+    const resizeCanvasToMapAspect = () => {
+      const availableHeight = Math.max(window.innerHeight - 144, 1);
+      const containerWidth = canvas.parentElement ? canvas.parentElement.clientWidth : 0;
+      const availableWidth = Math.max(containerWidth - 20, 1);
+
+      // 双向约束：
+      // 1) 宽度不超过可用宽度，且不超过高度 / (h/w)
+      // 2) 高度不超过可用高度，且不超过宽度 * (h/w)
+      const mapHeightWidthRatio = 1 / mapFrameRatio;
+      const targetWidth = Math.min(availableWidth, availableHeight / mapHeightWidthRatio);
+      const targetHeight = Math.min(availableHeight, availableWidth * mapHeightWidthRatio);
+
+      canvas.width = Math.max(Math.round(targetWidth), 1);
+      canvas.height = Math.max(Math.round(targetHeight), 1);
+      canvas.style.width = `${Math.max(Math.round(targetWidth), 1)}px`;
+      canvas.style.height = `${Math.max(Math.round(targetHeight), 1)}px`;
+    };
+
+    const getMapCropRect = (img) => {
+      const cropWidth = Math.max(1, Math.min(Math.round(mapCropConfig.loadWidth), img.width));
+      const cropHeight = Math.max(1, Math.min(Math.round(mapCropConfig.loadHeight), img.height));
+      const maxOffsetX = Math.max(img.width - cropWidth, 0);
+      const maxOffsetY = Math.max(img.height - cropHeight, 0);
+      const offsetX = Math.max(0, Math.min(Math.round(mapCropConfig.offsetX), maxOffsetX));
+      const offsetYFromBottom = Math.max(0, Math.min(Math.round(mapCropConfig.offsetY), maxOffsetY));
+      const sourceX = offsetX;
+      const sourceY = img.height - offsetYFromBottom - cropHeight;
+      return { sourceX, sourceY, cropWidth, cropHeight };
+    };
 
     const renderMap = (tick) => {
+      resizeCanvasToMapAspect();
       ctx.fillStyle = "#111";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
+      if (mapBackgroundLoaded) {
+        const crop = getMapCropRect(mapBackgroundImage);
+        ctx.save();
+        ctx.globalAlpha = 0.92;
+        ctx.drawImage(
+          mapBackgroundImage,
+          crop.sourceX,
+          crop.sourceY,
+          crop.cropWidth,
+          crop.cropHeight,
+          mapFramePad,
+          mapFramePad,
+          canvas.width - 2 * mapFramePad,
+          canvas.height - 2 * mapFramePad
+        );
+        ctx.restore();
+      }
       ctx.strokeStyle = "#666";
       ctx.lineWidth = 2;
-      ctx.strokeRect(20, 20, canvas.width - 40, canvas.height - 40);
+      ctx.strokeRect(
+        mapFramePad,
+        mapFramePad,
+        canvas.width - 2 * mapFramePad,
+        canvas.height - 2 * mapFramePad
+      );
       ctx.fillStyle = "#ccc";
       ctx.font = "14px Arial";
-      ctx.fillText("地图（归一化坐标）", 30, 36);
+      ctx.fillText(
+        mapBackgroundLoaded ? "地图（底图 + 归一化坐标）" : "地图（归一化坐标）",
+        mapFramePad + 10,
+        mapFramePad + 16
+      );
       renderWorldEntities(tick);
 
       for (const timeline of data.player_timelines) {
@@ -559,6 +633,7 @@ HTML_TEMPLATE = """<!doctype html>
       }
     });
 
+
     clearCacheBtn.addEventListener("click", async () => {
       if (!data) return;
       const ok = confirm("确定要删除当前录像的缓存文件吗？该操作不可撤销。");
@@ -589,6 +664,11 @@ HTML_TEMPLATE = """<!doctype html>
       fpsInput.value = String(data.playback_fps || 30);
       renderFromFloat(0);
     })();
+
+    window.addEventListener("resize", () => {
+      if (!data) return;
+      render(currentTick);
+    });
   </script>
 </body>
 </html>
@@ -636,7 +716,7 @@ def resolve_input_path(raw: str | None) -> Path:
     if not candidates:
         raise FileNotFoundError(
             "未提供 input_replay 且 replay_samples 下找不到回放文件。"
-            "请用: python3 replay_position_gui.py <your.dem|your.dem.bz2>"
+            "请用: python3 run.py <your.dem|your.dem.bz2>"
         )
     return candidates[0]
 
@@ -914,6 +994,8 @@ def run_server(host: str, port: int, payload: dict[str, Any], dem_path: Path, op
         return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
     html_bytes = HTML_TEMPLATE.encode("utf-8")
+    map_bg_path = Path(__file__).resolve().parent / "assets" / "maps" / "map_full.png"
+    map_bg_bytes = map_bg_path.read_bytes() if map_bg_path.exists() else None
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
@@ -931,6 +1013,17 @@ def run_server(host: str, port: int, payload: dict[str, Any], dem_path: Path, op
                 self.send_header("Content-Length", str(len(payload_bytes)))
                 self.end_headers()
                 self.wfile.write(payload_bytes)
+                return
+            if self.path == "/assets/maps/map_full.png":
+                if map_bg_bytes is None:
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Content-Length", str(len(map_bg_bytes)))
+                self.end_headers()
+                self.wfile.write(map_bg_bytes)
                 return
             self.send_response(404)
             self.end_headers()

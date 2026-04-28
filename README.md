@@ -29,7 +29,7 @@ uv sync
 
 # 3) 在 uv 环境中运行脚本
 uv run python extract_replay_ticks.py <input.dem|input.dem.bz2>
-uv run python replay_position_gui.py <input.dem|input.dem.bz2>
+uv run python run.py <input.dem|input.dem.bz2>
 uv run python replay_position_gui_tk.py <input.dem|input.dem.bz2>
 ```
 
@@ -75,7 +75,7 @@ python3 extract_replay_ticks.py replay.dem \
 
 ## 简易 GUI 回放（英雄位置）
 
-新增脚本：`replay_position_gui.py`
+新增脚本：`run.py`
 
 当前增强版功能：
 
@@ -100,10 +100,10 @@ python3 extract_replay_ticks.py replay.dem \
 
 ```bash
 # 指定回放
-python3 replay_position_gui.py /path/to/replay.dem
+python3 run.py /path/to/replay.dem
 
 # 也支持 .dem.bz2（会自动解压）
-python3 replay_position_gui.py /path/to/replay.dem.bz2
+python3 run.py /path/to/replay.dem.bz2
 ```
 
 如果不传路径，脚本会尝试读取 `replay_samples/` 下的第一个回放文件。
@@ -116,13 +116,13 @@ python3 replay_position_gui.py /path/to/replay.dem.bz2
 
 ```bash
 # 仅解析并导出 GUI 数据，不启动服务
-python3 replay_position_gui.py replay.dem --no-server --export-json output/gui_payload.json
+python3 run.py replay.dem --no-server --export-json output/gui_payload.json
 
 # 指定监听地址和端口
-python3 replay_position_gui.py replay.dem --host 0.0.0.0 --port 9000
+python3 run.py replay.dem --host 0.0.0.0 --port 9000
 
 # 指定默认播放刷新率（FPS）
-python3 replay_position_gui.py replay.dem --fps 30
+python3 run.py replay.dem --fps 30
 ```
 
 说明：
@@ -183,3 +183,14 @@ python3 replay_position_gui_tk.py replay.dem --fps 30
 
 - 该文件可直接用于 `extract_replay_ticks.py` 与两个 GUI 脚本的快速验证。
 - 选择保留 `.dem.bz2` 压缩格式，以减少仓库体积；脚本会自动解压为 `.dem`（若需要）。
+
+## 素材目录
+
+为便于多人协作，项目素材统一放在 `assets/` 目录下：
+
+- `assets/maps/`：地图相关素材（例如 `map_full.png`）
+- `assets/heroes/icons/`：英雄图标
+- `assets/ui/backgrounds/`：UI 背景素材
+- `assets/ui/widgets/`：UI 组件素材
+
+目录细化规范可见 `assets/README.md`。
