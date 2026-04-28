@@ -63,7 +63,31 @@ HTML_TEMPLATE = """<!doctype html>
     }
     .meta { font-size: 12px; color: #c8c8c8; }
     .meta strong { color: #ffffff; }
-    .controls { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+    .controls {
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 8px;
+    }
+    .control-row {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      flex-wrap: wrap;
+    }
+    .slider-wrap {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      flex: 1;
+      min-width: 280px;
+    }
+    .speed-indicator {
+      font-size: 12px;
+      color: #cfe4ff;
+      min-width: 44px;
+      text-align: center;
+    }
     button {
       background: #2d6cdf;
       color: #fff;
@@ -144,94 +168,6 @@ HTML_TEMPLATE = """<!doctype html>
     .mp { color: #7BB5FF; }
     .dead { color: #ff7d7d; }
     .small-muted { color: #9ba7b6; font-size: 11px; }
-    .debug-panel {
-      margin-top: 8px;
-      border: 1px solid #2b313a;
-      border-radius: 8px;
-      background: #121820;
-      padding: 8px;
-      max-height: 240px;
-      overflow: auto;
-    }
-    .debug-panel h4 { margin: 0 0 6px; font-size: 12px; color: #d8e3f1; }
-    .debug-filters {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px 10px;
-      margin-bottom: 6px;
-      align-items: center;
-    }
-    .debug-filters label { color: #9fb6cf; font-size: 11px; display: flex; align-items: center; gap: 4px; }
-    .debug-filters select {
-      background: #0f1318;
-      color: #e8e8e8;
-      border: 1px solid #2f3946;
-      border-radius: 4px;
-      padding: 2px 4px;
-      font-size: 11px;
-      max-width: 140px;
-    }
-    .debug-table { width: 100%; border-collapse: collapse; font-size: 11px; }
-    .debug-table th, .debug-table td {
-      border-bottom: 1px solid #253041;
-      padding: 4px 6px;
-      text-align: left;
-      white-space: nowrap;
-    }
-    .debug-table th { color: #8fb3d9; position: sticky; top: 0; background: #121820; }
-    .debug-sort-btn {
-      background: transparent;
-      border: none;
-      color: #8fb3d9;
-      font-size: 11px;
-      padding: 0;
-      cursor: pointer;
-    }
-    .debug-sort-btn.active { color: #d7ecff; font-weight: bold; }
-    .debug-table .inactive { color: #ff9090; font-weight: bold; }
-    .debug-table .active { color: #8ff0a4; font-weight: bold; }
-    .debug-btn {
-      background: #3a4d63;
-      border: none;
-      color: #fff;
-      border-radius: 4px;
-      padding: 2px 8px;
-      font-size: 11px;
-      cursor: pointer;
-    }
-    .debug-modal {
-      position: fixed;
-      inset: 0;
-      background: rgba(0, 0, 0, 0.55);
-      display: none;
-      align-items: center;
-      justify-content: center;
-      z-index: 9999;
-    }
-    .debug-modal.open { display: flex; }
-    .debug-modal-body {
-      width: min(980px, 92vw);
-      max-height: 86vh;
-      overflow: auto;
-      background: #0f1620;
-      border: 1px solid #3d4f66;
-      border-radius: 8px;
-      padding: 10px;
-    }
-    .debug-modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
-    .debug-modal-title { font-size: 13px; color: #d9e6f5; }
-    .debug-json {
-      margin: 0;
-      font-size: 11px;
-      line-height: 1.45;
-      color: #c9e2ff;
-      background: #0b1119;
-      border: 1px solid #26374a;
-      border-radius: 6px;
-      padding: 8px;
-      white-space: pre-wrap;
-      word-break: break-word;
-    }
     .settings-modal {
       position: fixed;
       inset: 0;
@@ -315,16 +251,26 @@ HTML_TEMPLATE = """<!doctype html>
       <div class="meta" id="titleLine">Dota2 回放可视化</div>
       <div class="meta" id="tickLine"></div>
       <div class="controls">
-        <button id="playBtn">播放</button>
-        <button id="clearCacheBtn" style="background:#8b1e2d;">清理缓存</button>
-        <button id="openDebugPanelBtn" style="background:#3a4d63;">调试对象</button>
-        <button id="toggleTrailBtn" style="background:#3a4d63;">轨迹：关</button>
-        <button id="openTrailSettingsBtn" style="background:#3a4d63;">轨迹设置</button>
-        <button id="toggleHeatmapBtn" style="background:#3a4d63;">热力图：关</button>
-        <button id="openHeatmapSettingsBtn" style="background:#3a4d63;">热力图设置</button>
-        <input id="slider" type="range" min="0" max="1" step="1" value="0" />
-        <label for="fpsInput" class="small-muted">刷新率(FPS)</label>
-        <input id="fpsInput" type="number" min="1" max="240" step="1" value="30" style="width: 76px;" />
+        <div class="control-row">
+          <button id="clearCacheBtn" style="background:#8b1e2d;">清理缓存</button>
+          <button id="toggleTrailBtn" style="background:#3a4d63;">轨迹：关</button>
+          <button id="openTrailSettingsBtn" style="background:#3a4d63;">轨迹设置</button>
+          <button id="toggleHeatmapBtn" style="background:#3a4d63;">热力图：关</button>
+          <button id="openHeatmapSettingsBtn" style="background:#3a4d63;">热力图设置</button>
+        </div>
+        <div class="control-row">
+          <button id="playBtn">播放</button>
+          <button id="seekBack10Btn" style="background:#3a4d63;">后退10秒</button>
+          <button id="seekForward10Btn" style="background:#3a4d63;">前进10秒</button>
+          <button id="speedHalfBtn" style="background:#3a4d63;">0.5x</button>
+          <button id="speedDoubleBtn" style="background:#3a4d63;">2x</button>
+          <span id="speedIndicator" class="speed-indicator">1x</span>
+          <div class="slider-wrap">
+            <input id="slider" type="range" min="0" max="1" step="1" value="0" />
+            <label for="fpsInput" class="small-muted">刷新率(FPS)</label>
+            <input id="fpsInput" type="number" min="1" max="240" step="1" value="30" style="width: 76px;" />
+          </div>
+        </div>
       </div>
       <canvas id="mapCanvas" width="1200" height="780"></canvas>
       <div class="legend">英雄：绿/红圆点（天辉/夜魇，死亡不显示） | 建筑：基/塔/营/建 | 单位：近/远/车/野 | 资源点：莲/肉/折</div>
@@ -335,49 +281,6 @@ HTML_TEMPLATE = """<!doctype html>
       <div class="small-muted" style="margin-bottom: 8px;">显示：HP / MP / 复活倒计时（死亡时）</div>
       <div id="statusList" class="scroll"></div>
     </aside>
-  </div>
-  <div id="debugModal" class="debug-modal">
-    <div class="debug-modal-body">
-      <div class="debug-modal-header">
-        <div id="debugModalTitle" class="debug-modal-title">对象详情</div>
-        <button id="debugModalCloseBtn" class="debug-btn">关闭</button>
-      </div>
-      <pre id="debugModalJson" class="debug-json"></pre>
-    </div>
-  </div>
-  <div id="debugPanelModal" class="debug-modal">
-    <div class="debug-modal-body">
-      <div class="debug-modal-header">
-        <div class="debug-modal-title">调试对象表（当前帧，含激活/未激活）</div>
-        <button id="debugPanelCloseBtn" class="debug-btn">关闭</button>
-      </div>
-      <section class="debug-panel" style="margin-top:0; max-height:none; border:none; padding:0; background:transparent;">
-        <div class="debug-filters">
-          <label>名称<select id="debugFilterName"></select></label>
-          <label>类型<select id="debugFilterType"></select></label>
-          <label>图标<select id="debugFilterGlyph"></select></label>
-          <label>激活<select id="debugFilterActive"></select></label>
-          <label>坐标<select id="debugFilterCoord"></select></label>
-          <label>血量<select id="debugFilterHp"></select></label>
-          <label>队伍<select id="debugFilterTeam"></select></label>
-        </div>
-        <table class="debug-table">
-          <thead id="debugEntityHead">
-            <tr>
-              <th><button class="debug-sort-btn" data-sort-key="name">名称</button></th>
-              <th><button class="debug-sort-btn" data-sort-key="type">类型</button></th>
-              <th><button class="debug-sort-btn" data-sort-key="glyph">图标</button></th>
-              <th><button class="debug-sort-btn" data-sort-key="activeText">激活</button></th>
-              <th><button class="debug-sort-btn" data-sort-key="coord">坐标</button></th>
-              <th><button class="debug-sort-btn" data-sort-key="hpText">血量</button></th>
-              <th><button class="debug-sort-btn" data-sort-key="team">队伍</button></th>
-              <th>操作</th>
-            </tr>
-          </thead>
-          <tbody id="debugEntityRows"></tbody>
-        </table>
-      </section>
-    </div>
   </div>
   <div id="trailSettingsModal" class="settings-modal">
     <div class="settings-body">
@@ -588,128 +491,6 @@ HTML_TEMPLATE = """<!doctype html>
       }
     };
 
-    const renderDebugEntities = (tick) => {
-      if (!data) return;
-      const items = [];
-      for (const timeline of (data.entity_timelines || [])) {
-        const st = stateAtTick(timeline, tick);
-        if (!st) continue;
-        const name = entityShortName(timeline.entity_name) || timeline.entity_name || `entity_${timeline.entity_id}`;
-        const activeClass = st.active ? "active" : "inactive";
-        const activeText = st.active ? "是" : "否";
-        const coord = (st.x === null || st.y === null) ? "-" : `${Number(st.x).toFixed(1)}, ${Number(st.y).toFixed(1)}`;
-        const hpText = `${Math.max(0, Number(st.hp || 0))}/${Math.max(0, Number(st.max_hp || 0))}`;
-        items.push({
-          entityId: timeline.entity_id,
-          tick,
-          name,
-          type: `${timeline.category}.${timeline.subtype}`,
-          glyph: entityGlyph(timeline),
-          activeText,
-          activeClass,
-          coord,
-          hpText,
-          team: String(timeline.team),
-        });
-      }
-
-      const buildOptions = (selectEl, values, currentValue) => {
-        const prev = currentValue || "ALL";
-        const uniq = [...new Set(values)].sort((a, b) => a.localeCompare(b));
-        const options = ['<option value="ALL">全部</option>']
-          .concat(uniq.map((v) => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`));
-        selectEl.innerHTML = options.join("");
-        selectEl.value = uniq.includes(prev) || prev === "ALL" ? prev : "ALL";
-      };
-
-      buildOptions(debugFilterName, items.map((x) => x.name), debugFilterValues.name);
-      buildOptions(debugFilterType, items.map((x) => x.type), debugFilterValues.type);
-      buildOptions(debugFilterGlyph, items.map((x) => x.glyph), debugFilterValues.glyph);
-      buildOptions(debugFilterActive, items.map((x) => x.activeText), debugFilterValues.active);
-      buildOptions(debugFilterCoord, items.map((x) => x.coord), debugFilterValues.coord);
-      buildOptions(debugFilterHp, items.map((x) => x.hpText), debugFilterValues.hp);
-      buildOptions(debugFilterTeam, items.map((x) => x.team), debugFilterValues.team);
-
-      debugFilterValues.name = debugFilterName.value;
-      debugFilterValues.type = debugFilterType.value;
-      debugFilterValues.glyph = debugFilterGlyph.value;
-      debugFilterValues.active = debugFilterActive.value;
-      debugFilterValues.coord = debugFilterCoord.value;
-      debugFilterValues.hp = debugFilterHp.value;
-      debugFilterValues.team = debugFilterTeam.value;
-
-      const filtered = items.filter((x) =>
-        (debugFilterValues.name === "ALL" || x.name === debugFilterValues.name) &&
-        (debugFilterValues.type === "ALL" || x.type === debugFilterValues.type) &&
-        (debugFilterValues.glyph === "ALL" || x.glyph === debugFilterValues.glyph) &&
-        (debugFilterValues.active === "ALL" || x.activeText === debugFilterValues.active) &&
-        (debugFilterValues.coord === "ALL" || x.coord === debugFilterValues.coord) &&
-        (debugFilterValues.hp === "ALL" || x.hpText === debugFilterValues.hp) &&
-        (debugFilterValues.team === "ALL" || x.team === debugFilterValues.team)
-      );
-
-      const valueForSort = (item, key) => {
-        if (key === "team") return Number(item.team);
-        if (key === "hpText") return Number(String(item.hpText).split("/")[0] || 0);
-        return String(item[key] ?? "");
-      };
-
-      filtered.sort((a, b) => {
-        const av = valueForSort(a, debugSortState.key);
-        const bv = valueForSort(b, debugSortState.key);
-        let cmp = 0;
-        if (typeof av === "number" && typeof bv === "number") cmp = av - bv;
-        else cmp = String(av).localeCompare(String(bv), "zh-CN", { numeric: true, sensitivity: "base" });
-        if (cmp === 0) {
-          cmp = a.name.localeCompare(b.name, "zh-CN", { numeric: true, sensitivity: "base" });
-        }
-        return debugSortState.direction === "asc" ? cmp : -cmp;
-      });
-
-      for (const btn of debugEntityHead.querySelectorAll(".debug-sort-btn")) {
-        const key = btn.getAttribute("data-sort-key");
-        const active = key === debugSortState.key;
-        const baseLabel = btn.getAttribute("data-label") || btn.textContent.replace(/\\s[▲▼]$/, "");
-        btn.classList.toggle("active", active);
-        const arrow = active ? (debugSortState.direction === "asc" ? " ▲" : " ▼") : "";
-        btn.textContent = `${baseLabel}${arrow}`;
-      }
-
-      const rows = filtered.map((item) => `
-          <tr>
-            <td>${escapeHtml(item.name)}</td>
-            <td>${escapeHtml(item.type)}</td>
-            <td>${escapeHtml(item.glyph)}</td>
-            <td class="${item.activeClass}">${item.activeText}</td>
-            <td>${escapeHtml(item.coord)}</td>
-            <td>${escapeHtml(item.hpText)}</td>
-            <td>${escapeHtml(item.team)}</td>
-            <td><button class="debug-btn" data-entity-id="${item.entityId}" data-tick="${item.tick}">详情</button></td>
-          </tr>
-        `);
-      debugEntityRows.innerHTML = rows.join("");
-    };
-
-    const showEntityDebugModal = (entityId, tick) => {
-      if (!data) return;
-      const timeline = (data.entity_timelines || []).find((x) => Number(x.entity_id) === Number(entityId));
-      if (!timeline) return;
-      const st = stateAtTick(timeline, tick);
-      const detail = {
-        tick,
-        entity_id: timeline.entity_id,
-        entity_name: timeline.entity_name,
-        class_name: timeline.class_name,
-        team: timeline.team,
-        category: timeline.category,
-        subtype: timeline.subtype,
-        glyph: entityGlyph(timeline),
-        state_at_tick: st,
-      };
-      debugModalTitle.textContent = `对象详情 #${timeline.entity_id} @ Tick ${tick}`;
-      debugModalJson.textContent = JSON.stringify(detail, null, 2);
-      debugModal.classList.add("open");
-    };
 
     const killsAtTick = (timeline, tick) => upperBound(timeline.kill_event_ticks, tick);
 
@@ -742,7 +523,11 @@ HTML_TEMPLATE = """<!doctype html>
     const titleLine = document.getElementById("titleLine");
     const tickLine = document.getElementById("tickLine");
     const playBtn = document.getElementById("playBtn");
-    const openDebugPanelBtn = document.getElementById("openDebugPanelBtn");
+    const seekBack10Btn = document.getElementById("seekBack10Btn");
+    const seekForward10Btn = document.getElementById("seekForward10Btn");
+    const speedHalfBtn = document.getElementById("speedHalfBtn");
+    const speedDoubleBtn = document.getElementById("speedDoubleBtn");
+    const speedIndicator = document.getElementById("speedIndicator");
     const slider = document.getElementById("slider");
     const clearCacheBtn = document.getElementById("clearCacheBtn");
     const toggleTrailBtn = document.getElementById("toggleTrailBtn");
@@ -755,21 +540,6 @@ HTML_TEMPLATE = """<!doctype html>
     const fpsInput = document.getElementById("fpsInput");
     const canvas = document.getElementById("mapCanvas");
     const ctx = canvas.getContext("2d");
-    const debugEntityRows = document.getElementById("debugEntityRows");
-    const debugPanelModal = document.getElementById("debugPanelModal");
-    const debugPanelCloseBtn = document.getElementById("debugPanelCloseBtn");
-    const debugModal = document.getElementById("debugModal");
-    const debugModalTitle = document.getElementById("debugModalTitle");
-    const debugModalJson = document.getElementById("debugModalJson");
-    const debugModalCloseBtn = document.getElementById("debugModalCloseBtn");
-    const debugFilterName = document.getElementById("debugFilterName");
-    const debugFilterType = document.getElementById("debugFilterType");
-    const debugFilterGlyph = document.getElementById("debugFilterGlyph");
-    const debugFilterActive = document.getElementById("debugFilterActive");
-    const debugFilterCoord = document.getElementById("debugFilterCoord");
-    const debugFilterHp = document.getElementById("debugFilterHp");
-    const debugFilterTeam = document.getElementById("debugFilterTeam");
-    const debugEntityHead = document.getElementById("debugEntityHead");
     const trailSettingsModal = document.getElementById("trailSettingsModal");
     const trailSettingsCloseBtn = document.getElementById("trailSettingsCloseBtn");
     const trailDensityInput = document.getElementById("trailDensityInput");
@@ -828,23 +598,11 @@ HTML_TEMPLATE = """<!doctype html>
     let currentTickFloat = 0;
     let playbackAnchorRealMs = 0;
     let playbackAnchorTick = 0;
+    let playbackSpeed = 1.0;
     let hasLoggedFirstMapRender = false;
     let hasLoggedMapWait = false;
     let hasLoggedCropRect = false;
     let hasLoggedResize = false;
-    const debugFilterValues = {
-      name: "ALL",
-      type: "ALL",
-      glyph: "ALL",
-      active: "ALL",
-      coord: "ALL",
-      hp: "ALL",
-      team: "ALL",
-    };
-    const debugSortState = {
-      key: "name",
-      direction: "asc",
-    };
     const mapBackgroundImage = new Image();
     let mapBackgroundLoaded = false;
     // debug+DSR-MAPDBG-01: 底图加载开始与结束日志。
@@ -1162,7 +920,6 @@ HTML_TEMPLATE = """<!doctype html>
       renderMap(tick);
       renderBoard(tick);
       renderStatus(tick);
-      renderDebugEntities(tick);
     };
 
     const renderFromFloat = (tickFloat) => {
@@ -1180,6 +937,31 @@ HTML_TEMPLATE = """<!doctype html>
       }
     };
 
+    const updateSpeedUI = () => {
+      speedIndicator.textContent = `${playbackSpeed}x`;
+      speedHalfBtn.style.background = playbackSpeed === 0.5 ? "#2d6cdf" : "#3a4d63";
+      speedDoubleBtn.style.background = playbackSpeed === 2.0 ? "#2d6cdf" : "#3a4d63";
+    };
+
+    const setPlaybackSpeed = (speed) => {
+      playbackSpeed = speed;
+      updateSpeedUI();
+      if (playing) {
+        playbackAnchorRealMs = performance.now();
+        playbackAnchorTick = currentTickFloat;
+      }
+    };
+
+    const seekBySeconds = (deltaSec) => {
+      if (!data) return;
+      const deltaTick = deltaSec * data.tick_rate;
+      renderFromFloat(currentTickFloat + deltaTick);
+      if (playing) {
+        playbackAnchorRealMs = performance.now();
+        playbackAnchorTick = currentTickFloat;
+      }
+    };
+
     const startPlayback = () => {
       const fps = Math.max(1, Number(fpsInput.value) || data.playback_fps || 30);
       fpsInput.value = String(Math.round(fps));
@@ -1190,7 +972,7 @@ HTML_TEMPLATE = """<!doctype html>
       const delay = Math.max(Math.round(1000 / fps), 1);
       timer = setInterval(() => {
         const elapsedSec = (performance.now() - playbackAnchorRealMs) / 1000;
-        const targetTickFloat = playbackAnchorTick + elapsedSec * data.tick_rate;
+        const targetTickFloat = playbackAnchorTick + elapsedSec * data.tick_rate * playbackSpeed;
         if (targetTickFloat >= data.game_end_tick) {
           renderFromFloat(data.game_end_tick);
           stopPlayback();
@@ -1205,6 +987,10 @@ HTML_TEMPLATE = """<!doctype html>
       if (playing) stopPlayback();
       else startPlayback();
     });
+    seekBack10Btn.addEventListener("click", () => seekBySeconds(-10));
+    seekForward10Btn.addEventListener("click", () => seekBySeconds(10));
+    speedHalfBtn.addEventListener("click", () => setPlaybackSpeed(0.5));
+    speedDoubleBtn.addEventListener("click", () => setPlaybackSpeed(2.0));
 
     slider.addEventListener("input", (e) => {
       if (!data) return;
@@ -1323,53 +1109,6 @@ HTML_TEMPLATE = """<!doctype html>
       }
     });
 
-    debugEntityRows.addEventListener("click", (e) => {
-      const btn = e.target.closest("button[data-entity-id]");
-      if (!btn) return;
-      const entityId = Number(btn.getAttribute("data-entity-id"));
-      const tick = Number(btn.getAttribute("data-tick"));
-      showEntityDebugModal(entityId, tick);
-    });
-    const onDebugFilterChange = () => {
-      if (!data) return;
-      renderDebugEntities(currentTick);
-    };
-    debugFilterName.addEventListener("change", onDebugFilterChange);
-    debugFilterType.addEventListener("change", onDebugFilterChange);
-    debugFilterGlyph.addEventListener("change", onDebugFilterChange);
-    debugFilterActive.addEventListener("change", onDebugFilterChange);
-    debugFilterCoord.addEventListener("change", onDebugFilterChange);
-    debugFilterHp.addEventListener("change", onDebugFilterChange);
-    debugFilterTeam.addEventListener("change", onDebugFilterChange);
-    for (const btn of debugEntityHead.querySelectorAll(".debug-sort-btn")) {
-      btn.setAttribute("data-label", btn.textContent);
-    }
-    debugEntityHead.addEventListener("click", (e) => {
-      const btn = e.target.closest(".debug-sort-btn");
-      if (!btn) return;
-      const key = btn.getAttribute("data-sort-key");
-      if (!key) return;
-      if (debugSortState.key === key) {
-        debugSortState.direction = debugSortState.direction === "asc" ? "desc" : "asc";
-      } else {
-        debugSortState.key = key;
-        debugSortState.direction = "asc";
-      }
-      if (!data) return;
-      renderDebugEntities(currentTick);
-    });
-    openDebugPanelBtn.addEventListener("click", () => {
-      debugPanelModal.classList.add("open");
-      if (data) renderDebugEntities(currentTick);
-    });
-    debugPanelCloseBtn.addEventListener("click", () => debugPanelModal.classList.remove("open"));
-    debugPanelModal.addEventListener("click", (e) => {
-      if (e.target === debugPanelModal) debugPanelModal.classList.remove("open");
-    });
-    debugModalCloseBtn.addEventListener("click", () => debugModal.classList.remove("open"));
-    debugModal.addEventListener("click", (e) => {
-      if (e.target === debugModal) debugModal.classList.remove("open");
-    });
 
     (async () => {
       // debug+DSR-MAPDBG-01: 记录数据请求与首帧渲染耗时。
@@ -1391,6 +1130,7 @@ HTML_TEMPLATE = """<!doctype html>
       slider.max = String(data.game_end_tick);
       slider.value = "0";
       fpsInput.value = String(data.playback_fps || 30);
+      updateSpeedUI();
       ensureHeroSelectionInitialized();
       rebuildTrailHeroFilterUI();
       applyTrailNumberInput();
