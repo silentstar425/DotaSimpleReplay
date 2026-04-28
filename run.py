@@ -179,6 +179,15 @@ HTML_TEMPLATE = """<!doctype html>
       white-space: nowrap;
     }
     .debug-table th { color: #8fb3d9; position: sticky; top: 0; background: #121820; }
+    .debug-sort-btn {
+      background: transparent;
+      border: none;
+      color: #8fb3d9;
+      font-size: 11px;
+      padding: 0;
+      cursor: pointer;
+    }
+    .debug-sort-btn.active { color: #d7ecff; font-weight: bold; }
     .debug-table .inactive { color: #ff9090; font-weight: bold; }
     .debug-table .active { color: #8ff0a4; font-weight: bold; }
     .debug-btn {
@@ -287,9 +296,16 @@ HTML_TEMPLATE = """<!doctype html>
           <label>队伍<select id="debugFilterTeam"></select></label>
         </div>
         <table class="debug-table">
-          <thead>
+          <thead id="debugEntityHead">
             <tr>
-              <th>名称</th><th>类型</th><th>图标</th><th>激活</th><th>坐标</th><th>血量</th><th>队伍</th><th>操作</th>
+              <th><button class="debug-sort-btn" data-sort-key="name">名称</button></th>
+              <th><button class="debug-sort-btn" data-sort-key="type">类型</button></th>
+              <th><button class="debug-sort-btn" data-sort-key="glyph">图标</button></th>
+              <th><button class="debug-sort-btn" data-sort-key="activeText">激活</button></th>
+              <th><button class="debug-sort-btn" data-sort-key="coord">坐标</button></th>
+              <th><button class="debug-sort-btn" data-sort-key="hpText">血量</button></th>
+              <th><button class="debug-sort-btn" data-sort-key="team">队伍</button></th>
+              <th>操作</th>
             </tr>
           </thead>
           <tbody id="debugEntityRows"></tbody>
@@ -522,6 +538,33 @@ HTML_TEMPLATE = """<!doctype html>
         (debugFilterValues.team === "ALL" || x.team === debugFilterValues.team)
       );
 
+      const valueForSort = (item, key) => {
+        if (key === "team") return Number(item.team);
+        if (key === "hpText") return Number(String(item.hpText).split("/")[0] || 0);
+        return String(item[key] ?? "");
+      };
+
+      filtered.sort((a, b) => {
+        const av = valueForSort(a, debugSortState.key);
+        const bv = valueForSort(b, debugSortState.key);
+        let cmp = 0;
+        if (typeof av === "number" && typeof bv === "number") cmp = av - bv;
+        else cmp = String(av).localeCompare(String(bv), "zh-CN", { numeric: true, sensitivity: "base" });
+        if (cmp === 0) {
+          cmp = a.name.localeCompare(b.name, "zh-CN", { numeric: true, sensitivity: "base" });
+        }
+        return debugSortState.direction === "asc" ? cmp : -cmp;
+      });
+
+      for (const btn of debugEntityHead.querySelectorAll(".debug-sort-btn")) {
+        const key = btn.getAttribute("data-sort-key");
+        const active = key === debugSortState.key;
+        const baseLabel = btn.getAttribute("data-label") || btn.textContent.replace(/\\s[▲▼]$/, "");
+        btn.classList.toggle("active", active);
+        const arrow = active ? (debugSortState.direction === "asc" ? " ▲" : " ▼") : "";
+        btn.textContent = `${baseLabel}${arrow}`;
+      }
+
       const rows = filtered.map((item) => `
           <tr>
             <td>${escapeHtml(item.name)}</td>
@@ -612,6 +655,7 @@ HTML_TEMPLATE = """<!doctype html>
     const debugFilterCoord = document.getElementById("debugFilterCoord");
     const debugFilterHp = document.getElementById("debugFilterHp");
     const debugFilterTeam = document.getElementById("debugFilterTeam");
+    const debugEntityHead = document.getElementById("debugEntityHead");
     // debug+DSR-MAPDBG-01: 统一调试 ID，用于定位“页面打开到地图可见”的耗时链路。
     const debugId = "debug+DSR-MAPDBG-01";
     const pageBootMs = performance.now();
@@ -651,6 +695,10 @@ HTML_TEMPLATE = """<!doctype html>
       coord: "ALL",
       hp: "ALL",
       team: "ALL",
+    };
+    const debugSortState = {
+      key: "name",
+      direction: "asc",
     };
     const mapBackgroundImage = new Image();
     let mapBackgroundLoaded = false;
@@ -976,6 +1024,23 @@ HTML_TEMPLATE = """<!doctype html>
     debugFilterCoord.addEventListener("change", onDebugFilterChange);
     debugFilterHp.addEventListener("change", onDebugFilterChange);
     debugFilterTeam.addEventListener("change", onDebugFilterChange);
+    for (const btn of debugEntityHead.querySelectorAll(".debug-sort-btn")) {
+      btn.setAttribute("data-label", btn.textContent);
+    }
+    debugEntityHead.addEventListener("click", (e) => {
+      const btn = e.target.closest(".debug-sort-btn");
+      if (!btn) return;
+      const key = btn.getAttribute("data-sort-key");
+      if (!key) return;
+      if (debugSortState.key === key) {
+        debugSortState.direction = debugSortState.direction === "asc" ? "desc" : "asc";
+      } else {
+        debugSortState.key = key;
+        debugSortState.direction = "asc";
+      }
+      if (!data) return;
+      renderDebugEntities(currentTick);
+    });
     openDebugPanelBtn.addEventListener("click", () => {
       debugPanelModal.classList.add("open");
       if (data) renderDebugEntities(currentTick);
