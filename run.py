@@ -144,6 +144,156 @@ HTML_TEMPLATE = """<!doctype html>
     .mp { color: #7BB5FF; }
     .dead { color: #ff7d7d; }
     .small-muted { color: #9ba7b6; font-size: 11px; }
+    .debug-panel {
+      margin-top: 8px;
+      border: 1px solid #2b313a;
+      border-radius: 8px;
+      background: #121820;
+      padding: 8px;
+      max-height: 240px;
+      overflow: auto;
+    }
+    .debug-panel h4 { margin: 0 0 6px; font-size: 12px; color: #d8e3f1; }
+    .debug-filters {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px 10px;
+      margin-bottom: 6px;
+      align-items: center;
+    }
+    .debug-filters label { color: #9fb6cf; font-size: 11px; display: flex; align-items: center; gap: 4px; }
+    .debug-filters select {
+      background: #0f1318;
+      color: #e8e8e8;
+      border: 1px solid #2f3946;
+      border-radius: 4px;
+      padding: 2px 4px;
+      font-size: 11px;
+      max-width: 140px;
+    }
+    .debug-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+    .debug-table th, .debug-table td {
+      border-bottom: 1px solid #253041;
+      padding: 4px 6px;
+      text-align: left;
+      white-space: nowrap;
+    }
+    .debug-table th { color: #8fb3d9; position: sticky; top: 0; background: #121820; }
+    .debug-sort-btn {
+      background: transparent;
+      border: none;
+      color: #8fb3d9;
+      font-size: 11px;
+      padding: 0;
+      cursor: pointer;
+    }
+    .debug-sort-btn.active { color: #d7ecff; font-weight: bold; }
+    .debug-table .inactive { color: #ff9090; font-weight: bold; }
+    .debug-table .active { color: #8ff0a4; font-weight: bold; }
+    .debug-btn {
+      background: #3a4d63;
+      border: none;
+      color: #fff;
+      border-radius: 4px;
+      padding: 2px 8px;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .debug-modal {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.55);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 9999;
+    }
+    .debug-modal.open { display: flex; }
+    .debug-modal-body {
+      width: min(980px, 92vw);
+      max-height: 86vh;
+      overflow: auto;
+      background: #0f1620;
+      border: 1px solid #3d4f66;
+      border-radius: 8px;
+      padding: 10px;
+    }
+    .debug-modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+    .debug-modal-title { font-size: 13px; color: #d9e6f5; }
+    .debug-json {
+      margin: 0;
+      font-size: 11px;
+      line-height: 1.45;
+      color: #c9e2ff;
+      background: #0b1119;
+      border: 1px solid #26374a;
+      border-radius: 6px;
+      padding: 8px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .settings-modal {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.55);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 9998;
+    }
+    .settings-modal.open { display: flex; }
+    .settings-body {
+      width: min(640px, 92vw);
+      max-height: 86vh;
+      overflow: auto;
+      background: #0f1620;
+      border: 1px solid #3d4f66;
+      border-radius: 8px;
+      padding: 12px;
+      box-sizing: border-box;
+    }
+    .settings-title {
+      font-size: 14px;
+      color: #d9e6f5;
+      margin-bottom: 10px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .settings-grid {
+      display: grid;
+      grid-template-columns: 1fr 110px;
+      gap: 8px 10px;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+    .settings-grid label { font-size: 12px; color: #bdd1e7; }
+    .settings-hero-list {
+      border: 1px solid #2f3946;
+      border-radius: 6px;
+      padding: 8px;
+      background: #0b1119;
+      max-height: 220px;
+      overflow: auto;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+      gap: 6px 10px;
+      margin-bottom: 10px;
+    }
+    .settings-hero-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: #d6e2ef;
+      font-size: 12px;
+    }
+    .settings-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .btn-secondary { background: #3a4d63; }
   </style>
 </head>
 <body>
@@ -167,6 +317,11 @@ HTML_TEMPLATE = """<!doctype html>
       <div class="controls">
         <button id="playBtn">播放</button>
         <button id="clearCacheBtn" style="background:#8b1e2d;">清理缓存</button>
+        <button id="openDebugPanelBtn" style="background:#3a4d63;">调试对象</button>
+        <button id="toggleTrailBtn" style="background:#3a4d63;">轨迹：关</button>
+        <button id="openTrailSettingsBtn" style="background:#3a4d63;">轨迹设置</button>
+        <button id="toggleHeatmapBtn" style="background:#3a4d63;">热力图：关</button>
+        <button id="openHeatmapSettingsBtn" style="background:#3a4d63;">热力图设置</button>
         <input id="slider" type="range" min="0" max="1" step="1" value="0" />
         <label for="fpsInput" class="small-muted">刷新率(FPS)</label>
         <input id="fpsInput" type="number" min="1" max="240" step="1" value="30" style="width: 76px;" />
@@ -180,6 +335,93 @@ HTML_TEMPLATE = """<!doctype html>
       <div class="small-muted" style="margin-bottom: 8px;">显示：HP / MP / 复活倒计时（死亡时）</div>
       <div id="statusList" class="scroll"></div>
     </aside>
+  </div>
+  <div id="debugModal" class="debug-modal">
+    <div class="debug-modal-body">
+      <div class="debug-modal-header">
+        <div id="debugModalTitle" class="debug-modal-title">对象详情</div>
+        <button id="debugModalCloseBtn" class="debug-btn">关闭</button>
+      </div>
+      <pre id="debugModalJson" class="debug-json"></pre>
+    </div>
+  </div>
+  <div id="debugPanelModal" class="debug-modal">
+    <div class="debug-modal-body">
+      <div class="debug-modal-header">
+        <div class="debug-modal-title">调试对象表（当前帧，含激活/未激活）</div>
+        <button id="debugPanelCloseBtn" class="debug-btn">关闭</button>
+      </div>
+      <section class="debug-panel" style="margin-top:0; max-height:none; border:none; padding:0; background:transparent;">
+        <div class="debug-filters">
+          <label>名称<select id="debugFilterName"></select></label>
+          <label>类型<select id="debugFilterType"></select></label>
+          <label>图标<select id="debugFilterGlyph"></select></label>
+          <label>激活<select id="debugFilterActive"></select></label>
+          <label>坐标<select id="debugFilterCoord"></select></label>
+          <label>血量<select id="debugFilterHp"></select></label>
+          <label>队伍<select id="debugFilterTeam"></select></label>
+        </div>
+        <table class="debug-table">
+          <thead id="debugEntityHead">
+            <tr>
+              <th><button class="debug-sort-btn" data-sort-key="name">名称</button></th>
+              <th><button class="debug-sort-btn" data-sort-key="type">类型</button></th>
+              <th><button class="debug-sort-btn" data-sort-key="glyph">图标</button></th>
+              <th><button class="debug-sort-btn" data-sort-key="activeText">激活</button></th>
+              <th><button class="debug-sort-btn" data-sort-key="coord">坐标</button></th>
+              <th><button class="debug-sort-btn" data-sort-key="hpText">血量</button></th>
+              <th><button class="debug-sort-btn" data-sort-key="team">队伍</button></th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="debugEntityRows"></tbody>
+        </table>
+      </section>
+    </div>
+  </div>
+  <div id="trailSettingsModal" class="settings-modal">
+    <div class="settings-body">
+      <div class="settings-title">
+        <span>轨迹设置</span>
+        <button id="trailSettingsCloseBtn" class="btn-secondary">关闭</button>
+      </div>
+      <div class="settings-grid">
+        <label for="trailDensityInput">轨迹密度（每几帧显示一个点）</label>
+        <input id="trailDensityInput" type="number" min="1" max="300" step="1" value="6" />
+        <label for="trailDotSizeInput">轨迹大小（圆点半径）</label>
+        <input id="trailDotSizeInput" type="number" min="1" max="20" step="0.5" value="2.5" />
+        <label for="trailLengthSecInput">轨迹长度（最近多少秒）</label>
+        <input id="trailLengthSecInput" type="number" min="1" max="300" step="1" value="20" />
+      </div>
+      <label class="settings-hero-item" style="margin-bottom:8px;">
+        <input id="trailFadeEnabledInput" type="checkbox" checked />
+        <span>轨迹淡出（旧点逐渐透明到 0）</span>
+      </label>
+      <div class="small-muted" style="margin-bottom:6px;">英雄筛选（显示哪些英雄轨迹）</div>
+      <div id="trailHeroFilterList" class="settings-hero-list"></div>
+      <div class="settings-actions">
+        <button id="trailSelectAllBtn" class="btn-secondary">全选</button>
+        <button id="trailSelectNoneBtn" class="btn-secondary">全不选</button>
+      </div>
+    </div>
+  </div>
+  <div id="heatmapSettingsModal" class="settings-modal">
+    <div class="settings-body">
+      <div class="settings-title">
+        <span>热力图设置</span>
+        <button id="heatmapSettingsCloseBtn" class="btn-secondary">关闭</button>
+      </div>
+      <div class="settings-grid">
+        <label for="heatmapIntervalSecInput">画圆间隔（秒）</label>
+        <input id="heatmapIntervalSecInput" type="number" min="0.1" max="60" step="0.1" value="1.0" />
+        <label for="heatmapRadiusInput">圆大小（半径）</label>
+        <input id="heatmapRadiusInput" type="number" min="4" max="200" step="1" value="24" />
+        <label for="heatmapOpacityInput">不透明度（0~1）</label>
+        <input id="heatmapOpacityInput" type="number" min="0.01" max="1" step="0.01" value="0.2" />
+        <label for="heatmapWindowSecInput">时间范围（最近多少秒）</label>
+        <input id="heatmapWindowSecInput" type="number" min="1" max="300" step="1" value="35" />
+      </div>
+    </div>
   </div>
 
   <script>
@@ -213,6 +455,13 @@ HTML_TEMPLATE = """<!doctype html>
       const cy = pad + (1 - ny) * (canvas.height - 2 * pad);
       return [cx, cy];
     };
+    const escapeHtml = (s) =>
+      String(s ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#39;");
 
     const upperBound = (arr, target) => {
       let left = 0;
@@ -324,6 +573,7 @@ HTML_TEMPLATE = """<!doctype html>
     const renderWorldEntities = (tick) => {
       for (const timeline of (data.entity_timelines || [])) {
         const st = stateAtTick(timeline, tick);
+        // 地图层只绘制激活对象；未激活对象可在下方调试表查看。
         if (!st || st.x === null || st.y === null || !st.active) continue;
         const [cx, cy] = mapToCanvas(st.x, st.y, data.map_bounds, canvas);
         drawEntityGlyph(ctx, cx, cy, timeline);
@@ -336,6 +586,129 @@ HTML_TEMPLATE = """<!doctype html>
           ctx.fillText(entityShortName(timeline.entity_name), cx + 10, cy - 2);
         }
       }
+    };
+
+    const renderDebugEntities = (tick) => {
+      if (!data) return;
+      const items = [];
+      for (const timeline of (data.entity_timelines || [])) {
+        const st = stateAtTick(timeline, tick);
+        if (!st) continue;
+        const name = entityShortName(timeline.entity_name) || timeline.entity_name || `entity_${timeline.entity_id}`;
+        const activeClass = st.active ? "active" : "inactive";
+        const activeText = st.active ? "是" : "否";
+        const coord = (st.x === null || st.y === null) ? "-" : `${Number(st.x).toFixed(1)}, ${Number(st.y).toFixed(1)}`;
+        const hpText = `${Math.max(0, Number(st.hp || 0))}/${Math.max(0, Number(st.max_hp || 0))}`;
+        items.push({
+          entityId: timeline.entity_id,
+          tick,
+          name,
+          type: `${timeline.category}.${timeline.subtype}`,
+          glyph: entityGlyph(timeline),
+          activeText,
+          activeClass,
+          coord,
+          hpText,
+          team: String(timeline.team),
+        });
+      }
+
+      const buildOptions = (selectEl, values, currentValue) => {
+        const prev = currentValue || "ALL";
+        const uniq = [...new Set(values)].sort((a, b) => a.localeCompare(b));
+        const options = ['<option value="ALL">全部</option>']
+          .concat(uniq.map((v) => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`));
+        selectEl.innerHTML = options.join("");
+        selectEl.value = uniq.includes(prev) || prev === "ALL" ? prev : "ALL";
+      };
+
+      buildOptions(debugFilterName, items.map((x) => x.name), debugFilterValues.name);
+      buildOptions(debugFilterType, items.map((x) => x.type), debugFilterValues.type);
+      buildOptions(debugFilterGlyph, items.map((x) => x.glyph), debugFilterValues.glyph);
+      buildOptions(debugFilterActive, items.map((x) => x.activeText), debugFilterValues.active);
+      buildOptions(debugFilterCoord, items.map((x) => x.coord), debugFilterValues.coord);
+      buildOptions(debugFilterHp, items.map((x) => x.hpText), debugFilterValues.hp);
+      buildOptions(debugFilterTeam, items.map((x) => x.team), debugFilterValues.team);
+
+      debugFilterValues.name = debugFilterName.value;
+      debugFilterValues.type = debugFilterType.value;
+      debugFilterValues.glyph = debugFilterGlyph.value;
+      debugFilterValues.active = debugFilterActive.value;
+      debugFilterValues.coord = debugFilterCoord.value;
+      debugFilterValues.hp = debugFilterHp.value;
+      debugFilterValues.team = debugFilterTeam.value;
+
+      const filtered = items.filter((x) =>
+        (debugFilterValues.name === "ALL" || x.name === debugFilterValues.name) &&
+        (debugFilterValues.type === "ALL" || x.type === debugFilterValues.type) &&
+        (debugFilterValues.glyph === "ALL" || x.glyph === debugFilterValues.glyph) &&
+        (debugFilterValues.active === "ALL" || x.activeText === debugFilterValues.active) &&
+        (debugFilterValues.coord === "ALL" || x.coord === debugFilterValues.coord) &&
+        (debugFilterValues.hp === "ALL" || x.hpText === debugFilterValues.hp) &&
+        (debugFilterValues.team === "ALL" || x.team === debugFilterValues.team)
+      );
+
+      const valueForSort = (item, key) => {
+        if (key === "team") return Number(item.team);
+        if (key === "hpText") return Number(String(item.hpText).split("/")[0] || 0);
+        return String(item[key] ?? "");
+      };
+
+      filtered.sort((a, b) => {
+        const av = valueForSort(a, debugSortState.key);
+        const bv = valueForSort(b, debugSortState.key);
+        let cmp = 0;
+        if (typeof av === "number" && typeof bv === "number") cmp = av - bv;
+        else cmp = String(av).localeCompare(String(bv), "zh-CN", { numeric: true, sensitivity: "base" });
+        if (cmp === 0) {
+          cmp = a.name.localeCompare(b.name, "zh-CN", { numeric: true, sensitivity: "base" });
+        }
+        return debugSortState.direction === "asc" ? cmp : -cmp;
+      });
+
+      for (const btn of debugEntityHead.querySelectorAll(".debug-sort-btn")) {
+        const key = btn.getAttribute("data-sort-key");
+        const active = key === debugSortState.key;
+        const baseLabel = btn.getAttribute("data-label") || btn.textContent.replace(/\\s[▲▼]$/, "");
+        btn.classList.toggle("active", active);
+        const arrow = active ? (debugSortState.direction === "asc" ? " ▲" : " ▼") : "";
+        btn.textContent = `${baseLabel}${arrow}`;
+      }
+
+      const rows = filtered.map((item) => `
+          <tr>
+            <td>${escapeHtml(item.name)}</td>
+            <td>${escapeHtml(item.type)}</td>
+            <td>${escapeHtml(item.glyph)}</td>
+            <td class="${item.activeClass}">${item.activeText}</td>
+            <td>${escapeHtml(item.coord)}</td>
+            <td>${escapeHtml(item.hpText)}</td>
+            <td>${escapeHtml(item.team)}</td>
+            <td><button class="debug-btn" data-entity-id="${item.entityId}" data-tick="${item.tick}">详情</button></td>
+          </tr>
+        `);
+      debugEntityRows.innerHTML = rows.join("");
+    };
+
+    const showEntityDebugModal = (entityId, tick) => {
+      if (!data) return;
+      const timeline = (data.entity_timelines || []).find((x) => Number(x.entity_id) === Number(entityId));
+      if (!timeline) return;
+      const st = stateAtTick(timeline, tick);
+      const detail = {
+        tick,
+        entity_id: timeline.entity_id,
+        entity_name: timeline.entity_name,
+        class_name: timeline.class_name,
+        team: timeline.team,
+        category: timeline.category,
+        subtype: timeline.subtype,
+        glyph: entityGlyph(timeline),
+        state_at_tick: st,
+      };
+      debugModalTitle.textContent = `对象详情 #${timeline.entity_id} @ Tick ${tick}`;
+      debugModalJson.textContent = JSON.stringify(detail, null, 2);
+      debugModal.classList.add("open");
     };
 
     const killsAtTick = (timeline, tick) => upperBound(timeline.kill_event_ticks, tick);
@@ -369,20 +742,82 @@ HTML_TEMPLATE = """<!doctype html>
     const titleLine = document.getElementById("titleLine");
     const tickLine = document.getElementById("tickLine");
     const playBtn = document.getElementById("playBtn");
+    const openDebugPanelBtn = document.getElementById("openDebugPanelBtn");
     const slider = document.getElementById("slider");
     const clearCacheBtn = document.getElementById("clearCacheBtn");
+    const toggleTrailBtn = document.getElementById("toggleTrailBtn");
+    const openTrailSettingsBtn = document.getElementById("openTrailSettingsBtn");
+    const toggleHeatmapBtn = document.getElementById("toggleHeatmapBtn");
+    const openHeatmapSettingsBtn = document.getElementById("openHeatmapSettingsBtn");
     const boardMetric = document.getElementById("boardMetric");
     const boardList = document.getElementById("boardList");
     const statusList = document.getElementById("statusList");
     const fpsInput = document.getElementById("fpsInput");
     const canvas = document.getElementById("mapCanvas");
     const ctx = canvas.getContext("2d");
+    const debugEntityRows = document.getElementById("debugEntityRows");
+    const debugPanelModal = document.getElementById("debugPanelModal");
+    const debugPanelCloseBtn = document.getElementById("debugPanelCloseBtn");
+    const debugModal = document.getElementById("debugModal");
+    const debugModalTitle = document.getElementById("debugModalTitle");
+    const debugModalJson = document.getElementById("debugModalJson");
+    const debugModalCloseBtn = document.getElementById("debugModalCloseBtn");
+    const debugFilterName = document.getElementById("debugFilterName");
+    const debugFilterType = document.getElementById("debugFilterType");
+    const debugFilterGlyph = document.getElementById("debugFilterGlyph");
+    const debugFilterActive = document.getElementById("debugFilterActive");
+    const debugFilterCoord = document.getElementById("debugFilterCoord");
+    const debugFilterHp = document.getElementById("debugFilterHp");
+    const debugFilterTeam = document.getElementById("debugFilterTeam");
+    const debugEntityHead = document.getElementById("debugEntityHead");
+    const trailSettingsModal = document.getElementById("trailSettingsModal");
+    const trailSettingsCloseBtn = document.getElementById("trailSettingsCloseBtn");
+    const trailDensityInput = document.getElementById("trailDensityInput");
+    const trailDotSizeInput = document.getElementById("trailDotSizeInput");
+    const trailLengthSecInput = document.getElementById("trailLengthSecInput");
+    const trailFadeEnabledInput = document.getElementById("trailFadeEnabledInput");
+    const trailHeroFilterList = document.getElementById("trailHeroFilterList");
+    const trailSelectAllBtn = document.getElementById("trailSelectAllBtn");
+    const trailSelectNoneBtn = document.getElementById("trailSelectNoneBtn");
+    const heatmapSettingsModal = document.getElementById("heatmapSettingsModal");
+    const heatmapSettingsCloseBtn = document.getElementById("heatmapSettingsCloseBtn");
+    const heatmapIntervalSecInput = document.getElementById("heatmapIntervalSecInput");
+    const heatmapRadiusInput = document.getElementById("heatmapRadiusInput");
+    const heatmapOpacityInput = document.getElementById("heatmapOpacityInput");
+    const heatmapWindowSecInput = document.getElementById("heatmapWindowSecInput");
+    // debug+DSR-MAPDBG-01: 统一调试 ID，用于定位“页面打开到地图可见”的耗时链路。
+    const debugId = "debug+DSR-MAPDBG-01";
+    const pageBootMs = performance.now();
+    const debugLog = (stage, extra = null) => {
+      const elapsed = (performance.now() - pageBootMs).toFixed(1);
+      if (extra === null) {
+        console.debug(`[${debugId}] ${stage} | +${elapsed}ms`);
+      } else {
+        console.debug(`[${debugId}] ${stage} | +${elapsed}ms`, extra);
+      }
+    };
     const mapFrameRatio = 1;
+    // debug+DSR-MAPDBG-01: 固定裁剪参数（本轮调试确认值）。
     const mapCropConfig = {
       loadWidth: 1045,  // 载入宽度（裁剪框宽）
       loadHeight: 1070, // 载入高度（裁剪框高）
       offsetX: 69,      // 横偏移：裁剪框左下角到原图左下角的 x 距离
       offsetY: 65,      // 纵偏移：裁剪框左下角到原图左下角的 y 距离
+    };
+    const heroTrailSettings = {
+      enabled: false,
+      sampleEveryTicks: 6,
+      dotRadius: 2.5,
+      durationSec: 20,
+      fadeOut: true,
+      selectedHeroes: new Set(),
+    };
+    const heatmapSettings = {
+      enabled: false,
+      intervalSec: 1.0,
+      radius: 24,
+      opacity: 0.2,
+      durationSec: 35,
     };
 
     let data = null;
@@ -392,10 +827,39 @@ HTML_TEMPLATE = """<!doctype html>
     let currentTickFloat = 0;
     let playbackAnchorRealMs = 0;
     let playbackAnchorTick = 0;
+    let hasLoggedFirstMapRender = false;
+    let hasLoggedMapWait = false;
+    let hasLoggedCropRect = false;
+    let hasLoggedResize = false;
+    const debugFilterValues = {
+      name: "ALL",
+      type: "ALL",
+      glyph: "ALL",
+      active: "ALL",
+      coord: "ALL",
+      hp: "ALL",
+      team: "ALL",
+    };
+    const debugSortState = {
+      key: "name",
+      direction: "asc",
+    };
     const mapBackgroundImage = new Image();
     let mapBackgroundLoaded = false;
-    mapBackgroundImage.onload = () => { mapBackgroundLoaded = true; };
-    mapBackgroundImage.onerror = () => { mapBackgroundLoaded = false; };
+    // debug+DSR-MAPDBG-01: 底图加载开始与结束日志。
+    debugLog("map-image-load-start", { src: "/assets/maps/map_full.png" });
+    mapBackgroundImage.onload = () => {
+      mapBackgroundLoaded = true;
+      debugLog("map-image-load-success", {
+        naturalWidth: mapBackgroundImage.naturalWidth,
+        naturalHeight: mapBackgroundImage.naturalHeight,
+      });
+      if (data) render(currentTick);
+    };
+    mapBackgroundImage.onerror = () => {
+      mapBackgroundLoaded = false;
+      debugLog("map-image-load-failed");
+    };
     mapBackgroundImage.src = "/assets/maps/map_full.png";
 
     const resizeCanvasToMapAspect = () => {
@@ -414,6 +878,16 @@ HTML_TEMPLATE = """<!doctype html>
       canvas.height = Math.max(Math.round(targetHeight), 1);
       canvas.style.width = `${Math.max(Math.round(targetWidth), 1)}px`;
       canvas.style.height = `${Math.max(Math.round(targetHeight), 1)}px`;
+      // debug+DSR-MAPDBG-01: 记录尺寸约束首次命中值，确认地图未被侧栏遮挡。
+      if (!hasLoggedResize) {
+        hasLoggedResize = true;
+        debugLog("map-size-first-computed", {
+          availableWidth,
+          availableHeight,
+          targetWidth: canvas.width,
+          targetHeight: canvas.height,
+        });
+      }
     };
 
     const getMapCropRect = (img) => {
@@ -425,6 +899,18 @@ HTML_TEMPLATE = """<!doctype html>
       const offsetYFromBottom = Math.max(0, Math.min(Math.round(mapCropConfig.offsetY), maxOffsetY));
       const sourceX = offsetX;
       const sourceY = img.height - offsetYFromBottom - cropHeight;
+      // debug+DSR-MAPDBG-01: 记录首帧裁剪框参数，确认偏移和载入范围。
+      if (!hasLoggedCropRect) {
+        hasLoggedCropRect = true;
+        debugLog("map-crop-first-computed", {
+          sourceX,
+          sourceY,
+          cropWidth,
+          cropHeight,
+          imageWidth: img.width,
+          imageHeight: img.height,
+        });
+      }
       return { sourceX, sourceY, cropWidth, cropHeight };
     };
 
@@ -448,6 +934,15 @@ HTML_TEMPLATE = """<!doctype html>
           canvas.height - 2 * mapFramePad
         );
         ctx.restore();
+      } else if (!hasLoggedMapWait) {
+        hasLoggedMapWait = true;
+        // debug+DSR-MAPDBG-01: 区分“数据到了但底图尚未加载”的等待状态。
+        debugLog("map-render-waiting-image");
+      }
+      // debug+DSR-MAPDBG-01: 地图首帧渲染完成时刻。
+      if (!hasLoggedFirstMapRender) {
+        hasLoggedFirstMapRender = true;
+        debugLog("map-first-render-done", { tick, mapBackgroundLoaded });
       }
       ctx.strokeStyle = "#666";
       ctx.lineWidth = 2;
@@ -465,6 +960,8 @@ HTML_TEMPLATE = """<!doctype html>
         mapFramePad + 16
       );
       renderWorldEntities(tick);
+      renderHeroHeatmap(tick);
+      renderHeroTrails(tick);
 
       for (const timeline of data.player_timelines) {
         const st = stateAtTick(timeline, tick);
@@ -483,6 +980,108 @@ HTML_TEMPLATE = """<!doctype html>
         ctx.font = "12px Arial";
         ctx.fillText(shortHeroName(timeline.hero_name), cx + 9, cy - 9);
       }
+    };
+
+    const ensureHeroSelectionInitialized = () => {
+      if (!data || heroTrailSettings.selectedHeroes.size > 0) return;
+      for (const timeline of data.player_timelines) {
+        heroTrailSettings.selectedHeroes.add(timeline.hero_name);
+      }
+    };
+
+    const computeRecentHeroPoints = (timeline, tick, durationSec, everyTicks) => {
+      const out = [];
+      const startTick = Math.max(0, tick - Math.round(durationSec * data.tick_rate));
+      const startIdx = upperBound(timeline.ticks, startTick - 1);
+      const endIdx = upperBound(timeline.ticks, tick) - 1;
+      if (startIdx < 0 || endIdx < 0 || startIdx > endIdx) return out;
+      let nextAllowedTick = startTick;
+      for (let i = startIdx; i <= endIdx; i += 1) {
+        const ti = timeline.ticks[i];
+        if (ti < nextAllowedTick) continue;
+        const st = timeline.states[i];
+        if (!st || st.x === null || st.y === null) continue;
+        out.push({ tick: ti, x: st.x, y: st.y });
+        nextAllowedTick = ti + Math.max(1, everyTicks);
+      }
+      return out;
+    };
+
+    const renderHeroTrails = (tick) => {
+      if (!data || !heroTrailSettings.enabled) return;
+      ensureHeroSelectionInitialized();
+      const durationTicks = Math.max(1, Math.round(heroTrailSettings.durationSec * data.tick_rate));
+      for (const timeline of data.player_timelines) {
+        if (!heroTrailSettings.selectedHeroes.has(timeline.hero_name)) continue;
+        const pts = computeRecentHeroPoints(
+          timeline,
+          tick,
+          heroTrailSettings.durationSec,
+          heroTrailSettings.sampleEveryTicks
+        );
+        for (const pt of pts) {
+          const [cx, cy] = mapToCanvas(pt.x, pt.y, data.map_bounds, canvas);
+          let alpha = 0.85;
+          if (heroTrailSettings.fadeOut) {
+            const age = Math.max(0, tick - pt.tick);
+            const factor = 1 - age / durationTicks;
+            alpha = Math.max(0, Math.min(1, factor)) * 0.95;
+          }
+          ctx.save();
+          ctx.globalAlpha = alpha;
+          ctx.beginPath();
+          ctx.fillStyle = timeline.team === 2 ? "#63d471" : "#ff7668";
+          ctx.arc(cx, cy, Math.max(1, heroTrailSettings.dotRadius), 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        }
+      }
+    };
+
+    const renderHeroHeatmap = (tick) => {
+      if (!data || !heatmapSettings.enabled) return;
+      const intervalTicks = Math.max(1, Math.round(heatmapSettings.intervalSec * data.tick_rate));
+      for (const timeline of data.player_timelines) {
+        const pts = computeRecentHeroPoints(
+          timeline,
+          tick,
+          heatmapSettings.durationSec,
+          intervalTicks
+        );
+        for (const pt of pts) {
+          const [cx, cy] = mapToCanvas(pt.x, pt.y, data.map_bounds, canvas);
+          ctx.save();
+          ctx.globalAlpha = Math.max(0.01, Math.min(1, heatmapSettings.opacity));
+          ctx.beginPath();
+          ctx.fillStyle = timeline.team === 2 ? "#73bf69" : "#e57373";
+          ctx.arc(cx, cy, Math.max(2, heatmapSettings.radius), 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        }
+      }
+    };
+
+    const updateTrailToggleText = () => {
+      toggleTrailBtn.textContent = `轨迹：${heroTrailSettings.enabled ? "开" : "关"}`;
+    };
+    const updateHeatmapToggleText = () => {
+      toggleHeatmapBtn.textContent = `热力图：${heatmapSettings.enabled ? "开" : "关"}`;
+    };
+
+    const rebuildTrailHeroFilterUI = () => {
+      if (!data) return;
+      ensureHeroSelectionInitialized();
+      const html = data.player_timelines.map((timeline) => {
+        const checked = heroTrailSettings.selectedHeroes.has(timeline.hero_name) ? "checked" : "";
+        const label = `${shortHeroName(timeline.hero_name)} (${timeline.player_name || shortHeroName(timeline.hero_name)})`;
+        return `
+          <label class="settings-hero-item">
+            <input type="checkbox" data-hero-name="${escapeHtml(timeline.hero_name)}" ${checked} />
+            <span>${escapeHtml(label)}</span>
+          </label>
+        `;
+      }).join("");
+      trailHeroFilterList.innerHTML = html;
     };
 
     const renderBoard = (tick) => {
@@ -566,6 +1165,7 @@ HTML_TEMPLATE = """<!doctype html>
       renderMap(tick);
       renderBoard(tick);
       renderStatus(tick);
+      renderDebugEntities(tick);
     };
 
     const renderFromFloat = (tickFloat) => {
@@ -632,6 +1232,78 @@ HTML_TEMPLATE = """<!doctype html>
         startPlayback();
       }
     });
+    toggleTrailBtn.addEventListener("click", () => {
+      heroTrailSettings.enabled = !heroTrailSettings.enabled;
+      updateTrailToggleText();
+      if (data) render(currentTick);
+    });
+    toggleHeatmapBtn.addEventListener("click", () => {
+      heatmapSettings.enabled = !heatmapSettings.enabled;
+      updateHeatmapToggleText();
+      if (data) render(currentTick);
+    });
+    openTrailSettingsBtn.addEventListener("click", () => {
+      trailSettingsModal.classList.add("open");
+      if (data) rebuildTrailHeroFilterUI();
+    });
+    trailSettingsCloseBtn.addEventListener("click", () => trailSettingsModal.classList.remove("open"));
+    trailSettingsModal.addEventListener("click", (e) => {
+      if (e.target === trailSettingsModal) trailSettingsModal.classList.remove("open");
+    });
+    openHeatmapSettingsBtn.addEventListener("click", () => heatmapSettingsModal.classList.add("open"));
+    heatmapSettingsCloseBtn.addEventListener("click", () => heatmapSettingsModal.classList.remove("open"));
+    heatmapSettingsModal.addEventListener("click", (e) => {
+      if (e.target === heatmapSettingsModal) heatmapSettingsModal.classList.remove("open");
+    });
+    trailHeroFilterList.addEventListener("change", (e) => {
+      const target = e.target;
+      if (!(target instanceof HTMLInputElement)) return;
+      const heroName = target.getAttribute("data-hero-name");
+      if (!heroName) return;
+      if (target.checked) heroTrailSettings.selectedHeroes.add(heroName);
+      else heroTrailSettings.selectedHeroes.delete(heroName);
+      if (data) render(currentTick);
+    });
+    trailSelectAllBtn.addEventListener("click", () => {
+      if (!data) return;
+      heroTrailSettings.selectedHeroes = new Set(data.player_timelines.map((x) => x.hero_name));
+      rebuildTrailHeroFilterUI();
+      render(currentTick);
+    });
+    trailSelectNoneBtn.addEventListener("click", () => {
+      heroTrailSettings.selectedHeroes.clear();
+      rebuildTrailHeroFilterUI();
+      if (data) render(currentTick);
+    });
+    const applyTrailNumberInput = () => {
+      heroTrailSettings.sampleEveryTicks = Math.max(1, Math.min(300, Number(trailDensityInput.value) || 6));
+      heroTrailSettings.dotRadius = Math.max(1, Math.min(20, Number(trailDotSizeInput.value) || 2.5));
+      heroTrailSettings.durationSec = Math.max(1, Math.min(300, Number(trailLengthSecInput.value) || 20));
+      heroTrailSettings.fadeOut = Boolean(trailFadeEnabledInput.checked);
+      trailDensityInput.value = String(Math.round(heroTrailSettings.sampleEveryTicks));
+      trailDotSizeInput.value = String(Number(heroTrailSettings.dotRadius.toFixed(1)));
+      trailLengthSecInput.value = String(Math.round(heroTrailSettings.durationSec));
+      if (data) render(currentTick);
+    };
+    trailDensityInput.addEventListener("change", applyTrailNumberInput);
+    trailDotSizeInput.addEventListener("change", applyTrailNumberInput);
+    trailLengthSecInput.addEventListener("change", applyTrailNumberInput);
+    trailFadeEnabledInput.addEventListener("change", applyTrailNumberInput);
+    const applyHeatmapNumberInput = () => {
+      heatmapSettings.intervalSec = Math.max(0.1, Math.min(60, Number(heatmapIntervalSecInput.value) || 1.0));
+      heatmapSettings.radius = Math.max(4, Math.min(200, Number(heatmapRadiusInput.value) || 24));
+      heatmapSettings.opacity = Math.max(0.01, Math.min(1, Number(heatmapOpacityInput.value) || 0.2));
+      heatmapSettings.durationSec = Math.max(1, Math.min(300, Number(heatmapWindowSecInput.value) || 35));
+      heatmapIntervalSecInput.value = String(Number(heatmapSettings.intervalSec.toFixed(1)));
+      heatmapRadiusInput.value = String(Math.round(heatmapSettings.radius));
+      heatmapOpacityInput.value = String(Number(heatmapSettings.opacity.toFixed(2)));
+      heatmapWindowSecInput.value = String(Math.round(heatmapSettings.durationSec));
+      if (data) render(currentTick);
+    };
+    heatmapIntervalSecInput.addEventListener("change", applyHeatmapNumberInput);
+    heatmapRadiusInput.addEventListener("change", applyHeatmapNumberInput);
+    heatmapOpacityInput.addEventListener("change", applyHeatmapNumberInput);
+    heatmapWindowSecInput.addEventListener("change", applyHeatmapNumberInput);
 
 
     clearCacheBtn.addEventListener("click", async () => {
@@ -654,15 +1326,82 @@ HTML_TEMPLATE = """<!doctype html>
       }
     });
 
+    debugEntityRows.addEventListener("click", (e) => {
+      const btn = e.target.closest("button[data-entity-id]");
+      if (!btn) return;
+      const entityId = Number(btn.getAttribute("data-entity-id"));
+      const tick = Number(btn.getAttribute("data-tick"));
+      showEntityDebugModal(entityId, tick);
+    });
+    const onDebugFilterChange = () => {
+      if (!data) return;
+      renderDebugEntities(currentTick);
+    };
+    debugFilterName.addEventListener("change", onDebugFilterChange);
+    debugFilterType.addEventListener("change", onDebugFilterChange);
+    debugFilterGlyph.addEventListener("change", onDebugFilterChange);
+    debugFilterActive.addEventListener("change", onDebugFilterChange);
+    debugFilterCoord.addEventListener("change", onDebugFilterChange);
+    debugFilterHp.addEventListener("change", onDebugFilterChange);
+    debugFilterTeam.addEventListener("change", onDebugFilterChange);
+    for (const btn of debugEntityHead.querySelectorAll(".debug-sort-btn")) {
+      btn.setAttribute("data-label", btn.textContent);
+    }
+    debugEntityHead.addEventListener("click", (e) => {
+      const btn = e.target.closest(".debug-sort-btn");
+      if (!btn) return;
+      const key = btn.getAttribute("data-sort-key");
+      if (!key) return;
+      if (debugSortState.key === key) {
+        debugSortState.direction = debugSortState.direction === "asc" ? "desc" : "asc";
+      } else {
+        debugSortState.key = key;
+        debugSortState.direction = "asc";
+      }
+      if (!data) return;
+      renderDebugEntities(currentTick);
+    });
+    openDebugPanelBtn.addEventListener("click", () => {
+      debugPanelModal.classList.add("open");
+      if (data) renderDebugEntities(currentTick);
+    });
+    debugPanelCloseBtn.addEventListener("click", () => debugPanelModal.classList.remove("open"));
+    debugPanelModal.addEventListener("click", (e) => {
+      if (e.target === debugPanelModal) debugPanelModal.classList.remove("open");
+    });
+    debugModalCloseBtn.addEventListener("click", () => debugModal.classList.remove("open"));
+    debugModal.addEventListener("click", (e) => {
+      if (e.target === debugModal) debugModal.classList.remove("open");
+    });
+
     (async () => {
+      // debug+DSR-MAPDBG-01: 记录数据请求与首帧渲染耗时。
+      debugLog("data-fetch-start");
+      const fetchStartMs = performance.now();
       const res = await fetch("/data");
+      debugLog("data-fetch-response", {
+        status: res.status,
+        elapsedMs: Number((performance.now() - fetchStartMs).toFixed(1)),
+      });
       data = await res.json();
+      debugLog("data-json-parsed", {
+        matchId: data.match_id,
+        gameEndTick: data.game_end_tick,
+        players: (data.player_timelines || []).length,
+      });
       titleLine.textContent = "Dota2 回放可视化";
       slider.min = "0";
       slider.max = String(data.game_end_tick);
       slider.value = "0";
       fpsInput.value = String(data.playback_fps || 30);
+      ensureHeroSelectionInitialized();
+      rebuildTrailHeroFilterUI();
+      applyTrailNumberInput();
+      applyHeatmapNumberInput();
+      updateTrailToggleText();
+      updateHeatmapToggleText();
       renderFromFloat(0);
+      debugLog("bootstrap-render-called");
     })();
 
     window.addEventListener("resize", () => {
@@ -994,8 +1733,13 @@ def run_server(host: str, port: int, payload: dict[str, Any], dem_path: Path, op
         return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
     html_bytes = HTML_TEMPLATE.encode("utf-8")
+    # debug+DSR-MAPDBG-01: 服务端静态底图读取与请求日志，定位是否卡在图片传输。
     map_bg_path = Path(__file__).resolve().parent / "assets" / "maps" / "map_full.png"
     map_bg_bytes = map_bg_path.read_bytes() if map_bg_path.exists() else None
+    print(
+        f"[debug+DSR-MAPDBG-01] map-bg-init path={map_bg_path} "
+        f"exists={map_bg_path.exists()} size={0 if map_bg_bytes is None else len(map_bg_bytes)}"
+    )
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
@@ -1016,9 +1760,11 @@ def run_server(host: str, port: int, payload: dict[str, Any], dem_path: Path, op
                 return
             if self.path == "/assets/maps/map_full.png":
                 if map_bg_bytes is None:
+                    print("[debug+DSR-MAPDBG-01] map-bg-request missing")
                     self.send_response(404)
                     self.end_headers()
                     return
+                print(f"[debug+DSR-MAPDBG-01] map-bg-request hit bytes={len(map_bg_bytes)}")
                 self.send_response(200)
                 self.send_header("Content-Type", "image/png")
                 self.send_header("Content-Length", str(len(map_bg_bytes)))
