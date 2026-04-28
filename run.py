@@ -209,6 +209,8 @@ HTML_TEMPLATE = """<!doctype html>
       z-index: 9999;
     }
     .debug-modal.open { display: flex; }
+    #debugPanelModal { z-index: 9999; }
+    #debugModal { z-index: 10000; }
     .debug-modal-body {
       width: min(980px, 92vw);
       max-height: 86vh;
