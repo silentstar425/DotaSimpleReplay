@@ -387,11 +387,11 @@ HTML_TEMPLATE = """<!doctype html>
       </div>
       <div class="settings-grid">
         <label for="trailDensityInput">轨迹密度（每几帧显示一个点）</label>
-        <input id="trailDensityInput" type="number" min="1" max="300" step="1" value="6" />
+        <input id="trailDensityInput" type="number" min="1" max="300" step="1" value="12" />
         <label for="trailDotSizeInput">轨迹大小（圆点半径）</label>
-        <input id="trailDotSizeInput" type="number" min="1" max="20" step="0.5" value="2.5" />
+        <input id="trailDotSizeInput" type="number" min="1" max="20" step="0.5" value="2.0" />
         <label for="trailLengthSecInput">轨迹长度（最近多少秒）</label>
-        <input id="trailLengthSecInput" type="number" min="1" max="300" step="1" value="20" />
+        <input id="trailLengthSecInput" type="number" min="1" max="300" step="1" value="30" />
       </div>
       <label class="settings-hero-item" style="margin-bottom:8px;">
         <input id="trailFadeEnabledInput" type="checkbox" checked />
@@ -413,13 +413,13 @@ HTML_TEMPLATE = """<!doctype html>
       </div>
       <div class="settings-grid">
         <label for="heatmapIntervalSecInput">画圆间隔（秒）</label>
-        <input id="heatmapIntervalSecInput" type="number" min="0.1" max="60" step="0.1" value="1.0" />
+        <input id="heatmapIntervalSecInput" type="number" min="0.1" max="60" step="0.1" value="2.0" />
         <label for="heatmapRadiusInput">圆大小（半径）</label>
-        <input id="heatmapRadiusInput" type="number" min="4" max="200" step="1" value="24" />
+        <input id="heatmapRadiusInput" type="number" min="4" max="200" step="1" value="36" />
         <label for="heatmapOpacityInput">不透明度（0~1）</label>
-        <input id="heatmapOpacityInput" type="number" min="0.01" max="1" step="0.01" value="0.2" />
+        <input id="heatmapOpacityInput" type="number" min="0.01" max="1" step="0.01" value="0.18" />
         <label for="heatmapWindowSecInput">时间范围（最近多少秒）</label>
-        <input id="heatmapWindowSecInput" type="number" min="1" max="300" step="1" value="35" />
+        <input id="heatmapWindowSecInput" type="number" min="1" max="300" step="1" value="60" />
       </div>
     </div>
   </div>
@@ -806,19 +806,19 @@ HTML_TEMPLATE = """<!doctype html>
     };
     const heroTrailSettings = {
       enabled: false,
-      sampleEveryTicks: 6,
-      dotRadius: 2.5,
-      durationSec: 20,
+      sampleEveryTicks: 12,
+      dotRadius: 2.0,
+      durationSec: 30,
       fadeOut: true,
       selectedHeroes: new Set(),
     };
     let heroSelectionInitialized = false;
     const heatmapSettings = {
       enabled: false,
-      intervalSec: 1.0,
-      radius: 24,
-      opacity: 0.2,
-      durationSec: 35,
+      intervalSec: 2.0,
+      radius: 36,
+      opacity: 0.18,
+      durationSec: 60,
     };
 
     let data = null;
@@ -1273,9 +1273,9 @@ HTML_TEMPLATE = """<!doctype html>
       if (data) render(currentTick);
     });
     const applyTrailNumberInput = () => {
-      heroTrailSettings.sampleEveryTicks = Math.max(1, Math.min(300, Number(trailDensityInput.value) || 6));
-      heroTrailSettings.dotRadius = Math.max(1, Math.min(20, Number(trailDotSizeInput.value) || 2.5));
-      heroTrailSettings.durationSec = Math.max(1, Math.min(300, Number(trailLengthSecInput.value) || 20));
+      heroTrailSettings.sampleEveryTicks = Math.max(1, Math.min(300, Number(trailDensityInput.value) || 12));
+      heroTrailSettings.dotRadius = Math.max(1, Math.min(20, Number(trailDotSizeInput.value) || 2.0));
+      heroTrailSettings.durationSec = Math.max(1, Math.min(300, Number(trailLengthSecInput.value) || 30));
       heroTrailSettings.fadeOut = Boolean(trailFadeEnabledInput.checked);
       trailDensityInput.value = String(Math.round(heroTrailSettings.sampleEveryTicks));
       trailDotSizeInput.value = String(Number(heroTrailSettings.dotRadius.toFixed(1)));
@@ -1287,10 +1287,10 @@ HTML_TEMPLATE = """<!doctype html>
     trailLengthSecInput.addEventListener("change", applyTrailNumberInput);
     trailFadeEnabledInput.addEventListener("change", applyTrailNumberInput);
     const applyHeatmapNumberInput = () => {
-      heatmapSettings.intervalSec = Math.max(0.1, Math.min(60, Number(heatmapIntervalSecInput.value) || 1.0));
-      heatmapSettings.radius = Math.max(4, Math.min(200, Number(heatmapRadiusInput.value) || 24));
-      heatmapSettings.opacity = Math.max(0.01, Math.min(1, Number(heatmapOpacityInput.value) || 0.2));
-      heatmapSettings.durationSec = Math.max(1, Math.min(300, Number(heatmapWindowSecInput.value) || 35));
+      heatmapSettings.intervalSec = Math.max(0.1, Math.min(60, Number(heatmapIntervalSecInput.value) || 2.0));
+      heatmapSettings.radius = Math.max(4, Math.min(200, Number(heatmapRadiusInput.value) || 36));
+      heatmapSettings.opacity = Math.max(0.01, Math.min(1, Number(heatmapOpacityInput.value) || 0.18));
+      heatmapSettings.durationSec = Math.max(1, Math.min(300, Number(heatmapWindowSecInput.value) || 60));
       heatmapIntervalSecInput.value = String(Number(heatmapSettings.intervalSec.toFixed(1)));
       heatmapRadiusInput.value = String(Math.round(heatmapSettings.radius));
       heatmapOpacityInput.value = String(Number(heatmapSettings.opacity.toFixed(2)));
