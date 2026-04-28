@@ -246,14 +246,37 @@ HTML_TEMPLATE = """<!doctype html>
       <div class="controls">
         <button id="playBtn">播放</button>
         <button id="clearCacheBtn" style="background:#8b1e2d;">清理缓存</button>
+        <button id="openDebugPanelBtn" style="background:#3a4d63;">调试对象</button>
         <input id="slider" type="range" min="0" max="1" step="1" value="0" />
         <label for="fpsInput" class="small-muted">刷新率(FPS)</label>
         <input id="fpsInput" type="number" min="1" max="240" step="1" value="30" style="width: 76px;" />
       </div>
       <canvas id="mapCanvas" width="1200" height="780"></canvas>
       <div class="legend">英雄：绿/红圆点（天辉/夜魇，死亡不显示） | 建筑：基/塔/营/建 | 单位：近/远/车/野 | 资源点：莲/肉/折</div>
-      <section class="debug-panel">
-        <h4>调试对象表（当前帧，含激活/未激活）</h4>
+    </main>
+
+    <aside class="side right">
+      <h3>英雄状态</h3>
+      <div class="small-muted" style="margin-bottom: 8px;">显示：HP / MP / 复活倒计时（死亡时）</div>
+      <div id="statusList" class="scroll"></div>
+    </aside>
+  </div>
+  <div id="debugModal" class="debug-modal">
+    <div class="debug-modal-body">
+      <div class="debug-modal-header">
+        <div id="debugModalTitle" class="debug-modal-title">对象详情</div>
+        <button id="debugModalCloseBtn" class="debug-btn">关闭</button>
+      </div>
+      <pre id="debugModalJson" class="debug-json"></pre>
+    </div>
+  </div>
+  <div id="debugPanelModal" class="debug-modal">
+    <div class="debug-modal-body">
+      <div class="debug-modal-header">
+        <div class="debug-modal-title">调试对象表（当前帧，含激活/未激活）</div>
+        <button id="debugPanelCloseBtn" class="debug-btn">关闭</button>
+      </div>
+      <section class="debug-panel" style="margin-top:0; max-height:none; border:none; padding:0; background:transparent;">
         <div class="debug-filters">
           <label>名称<select id="debugFilterName"></select></label>
           <label>类型<select id="debugFilterType"></select></label>
@@ -272,21 +295,6 @@ HTML_TEMPLATE = """<!doctype html>
           <tbody id="debugEntityRows"></tbody>
         </table>
       </section>
-    </main>
-
-    <aside class="side right">
-      <h3>英雄状态</h3>
-      <div class="small-muted" style="margin-bottom: 8px;">显示：HP / MP / 复活倒计时（死亡时）</div>
-      <div id="statusList" class="scroll"></div>
-    </aside>
-  </div>
-  <div id="debugModal" class="debug-modal">
-    <div class="debug-modal-body">
-      <div class="debug-modal-header">
-        <div id="debugModalTitle" class="debug-modal-title">对象详情</div>
-        <button id="debugModalCloseBtn" class="debug-btn">关闭</button>
-      </div>
-      <pre id="debugModalJson" class="debug-json"></pre>
     </div>
   </div>
 
@@ -581,6 +589,7 @@ HTML_TEMPLATE = """<!doctype html>
     const titleLine = document.getElementById("titleLine");
     const tickLine = document.getElementById("tickLine");
     const playBtn = document.getElementById("playBtn");
+    const openDebugPanelBtn = document.getElementById("openDebugPanelBtn");
     const slider = document.getElementById("slider");
     const clearCacheBtn = document.getElementById("clearCacheBtn");
     const boardMetric = document.getElementById("boardMetric");
@@ -590,6 +599,8 @@ HTML_TEMPLATE = """<!doctype html>
     const canvas = document.getElementById("mapCanvas");
     const ctx = canvas.getContext("2d");
     const debugEntityRows = document.getElementById("debugEntityRows");
+    const debugPanelModal = document.getElementById("debugPanelModal");
+    const debugPanelCloseBtn = document.getElementById("debugPanelCloseBtn");
     const debugModal = document.getElementById("debugModal");
     const debugModalTitle = document.getElementById("debugModalTitle");
     const debugModalJson = document.getElementById("debugModalJson");
@@ -965,6 +976,14 @@ HTML_TEMPLATE = """<!doctype html>
     debugFilterCoord.addEventListener("change", onDebugFilterChange);
     debugFilterHp.addEventListener("change", onDebugFilterChange);
     debugFilterTeam.addEventListener("change", onDebugFilterChange);
+    openDebugPanelBtn.addEventListener("click", () => {
+      debugPanelModal.classList.add("open");
+      if (data) renderDebugEntities(currentTick);
+    });
+    debugPanelCloseBtn.addEventListener("click", () => debugPanelModal.classList.remove("open"));
+    debugPanelModal.addEventListener("click", (e) => {
+      if (e.target === debugPanelModal) debugPanelModal.classList.remove("open");
+    });
     debugModalCloseBtn.addEventListener("click", () => debugModal.classList.remove("open"));
     debugModal.addEventListener("click", (e) => {
       if (e.target === debugModal) debugModal.classList.remove("open");
