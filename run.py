@@ -812,6 +812,7 @@ HTML_TEMPLATE = """<!doctype html>
       fadeOut: true,
       selectedHeroes: new Set(),
     };
+    let heroSelectionInitialized = false;
     const heatmapSettings = {
       enabled: false,
       intervalSec: 1.0,
@@ -983,33 +984,30 @@ HTML_TEMPLATE = """<!doctype html>
     };
 
     const ensureHeroSelectionInitialized = () => {
-      if (!data || heroTrailSettings.selectedHeroes.size > 0) return;
+      if (!data || heroSelectionInitialized) return;
       for (const timeline of data.player_timelines) {
         heroTrailSettings.selectedHeroes.add(timeline.hero_name);
       }
+      heroSelectionInitialized = true;
     };
 
     const computeRecentHeroPoints = (timeline, tick, durationSec, everyTicks) => {
       const out = [];
       const startTick = Math.max(0, tick - Math.round(durationSec * data.tick_rate));
-      const startIdx = upperBound(timeline.ticks, startTick - 1);
-      const endIdx = upperBound(timeline.ticks, tick) - 1;
-      if (startIdx < 0 || endIdx < 0 || startIdx > endIdx) return out;
-      let nextAllowedTick = startTick;
-      for (let i = startIdx; i <= endIdx; i += 1) {
-        const ti = timeline.ticks[i];
-        if (ti < nextAllowedTick) continue;
-        const st = timeline.states[i];
+      const step = Math.max(1, everyTicks);
+      const endAlignedTick = Math.floor(tick / step) * step;
+      for (let alignedTick = endAlignedTick; alignedTick >= startTick; alignedTick -= step) {
+        const idx = upperBound(timeline.ticks, alignedTick) - 1;
+        if (idx < 0) continue;
+        const st = timeline.states[idx];
         if (!st || st.x === null || st.y === null) continue;
-        out.push({ tick: ti, x: st.x, y: st.y });
-        nextAllowedTick = ti + Math.max(1, everyTicks);
+        out.push({ tick: alignedTick, x: st.x, y: st.y });
       }
       return out;
     };
 
     const renderHeroTrails = (tick) => {
       if (!data || !heroTrailSettings.enabled) return;
-      ensureHeroSelectionInitialized();
       const durationTicks = Math.max(1, Math.round(heroTrailSettings.durationSec * data.tick_rate));
       for (const timeline of data.player_timelines) {
         if (!heroTrailSettings.selectedHeroes.has(timeline.hero_name)) continue;
@@ -1070,7 +1068,6 @@ HTML_TEMPLATE = """<!doctype html>
 
     const rebuildTrailHeroFilterUI = () => {
       if (!data) return;
-      ensureHeroSelectionInitialized();
       const html = data.player_timelines.map((timeline) => {
         const checked = heroTrailSettings.selectedHeroes.has(timeline.hero_name) ? "checked" : "";
         const label = `${shortHeroName(timeline.hero_name)} (${timeline.player_name || shortHeroName(timeline.hero_name)})`;
