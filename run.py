@@ -190,6 +190,7 @@ HTML_TEMPLATE = """<!doctype html>
     .debug-sort-btn.active { color: #d7ecff; font-weight: bold; }
     .debug-table .inactive { color: #ff9090; font-weight: bold; }
     .debug-table .active { color: #8ff0a4; font-weight: bold; }
+    .debug-table tr.pinned-row td { color: #67e08a; }
     .debug-btn {
       background: #3a4d63;
       border: none;
@@ -301,6 +302,7 @@ HTML_TEMPLATE = """<!doctype html>
           <thead id="debugEntityHead">
             <tr>
               <th><button class="debug-sort-btn" data-sort-key="name">名称</button></th>
+              <th><button class="debug-sort-btn" data-sort-key="uid">对象ID</button></th>
               <th><button class="debug-sort-btn" data-sort-key="type">类型</button></th>
               <th><button class="debug-sort-btn" data-sort-key="glyph">图标</button></th>
               <th><button class="debug-sort-btn" data-sort-key="activeText">激活</button></th>
@@ -462,13 +464,31 @@ HTML_TEMPLATE = """<!doctype html>
       ctx2.fillText(glyph, cx, cy);
     };
 
+    const distanceBetween = (a, b) => {
+      if (!a || !b) return Number.POSITIVE_INFINITY;
+      if (a.x === null || a.y === null || b.x === null || b.y === null) return Number.POSITIVE_INFINITY;
+      const dx = Number(a.x) - Number(b.x);
+      const dy = Number(a.y) - Number(b.y);
+      return Math.hypot(dx, dy);
+    };
+
     const renderWorldEntities = (tick) => {
+      renderedWorldEntityHitboxes = [];
       for (const timeline of (data.entity_timelines || [])) {
         const st = stateAtTick(timeline, tick);
         // 地图层只绘制激活对象；未激活对象可在下方调试表查看。
         if (!st || st.x === null || st.y === null || !st.active) continue;
         const [cx, cy] = mapToCanvas(st.x, st.y, data.map_bounds, canvas);
         drawEntityGlyph(ctx, cx, cy, timeline);
+        const category = timeline.category || "other";
+        const radius = category === "roshan" || category === "tormentor" ? 9 : 7;
+        renderedWorldEntityHitboxes.push({
+          objectKey: `entity:${Number(timeline.entity_id)}`,
+          tick,
+          cx,
+          cy,
+          radius: radius + 4, // 给点击留一点容错半径
+        });
 
         if (timeline.category === "roshan" || timeline.category === "tormentor" || timeline.category === "lotus_pool") {
           ctx.fillStyle = "#d9e4f0";
@@ -487,12 +507,17 @@ HTML_TEMPLATE = """<!doctype html>
         const st = stateAtTick(timeline, tick);
         if (!st) continue;
         const name = entityShortName(timeline.entity_name) || timeline.entity_name || `entity_${timeline.entity_id}`;
+        const uid = (timeline.entity_id === null || timeline.entity_id === undefined)
+          ? `${timeline.class_name || "entity"}:${timeline.entity_name || name}`
+          : String(timeline.entity_id);
         const activeClass = st.active ? "active" : "inactive";
         const activeText = st.active ? "是" : "否";
         const coord = (st.x === null || st.y === null) ? "-" : `${Number(st.x).toFixed(1)}, ${Number(st.y).toFixed(1)}`;
         const hpText = `${Math.max(0, Number(st.hp || 0))}/${Math.max(0, Number(st.max_hp || 0))}`;
         items.push({
+          objectKey: `entity:${Number(timeline.entity_id)}`,
           entityId: timeline.entity_id,
+          uid,
           tick,
           name,
           type: `${timeline.category}.${timeline.subtype}`,
@@ -502,6 +527,32 @@ HTML_TEMPLATE = """<!doctype html>
           coord,
           hpText,
           team: String(timeline.team),
+          rawX: st.x,
+          rawY: st.y,
+        });
+      }
+      for (const timeline of (data.player_timelines || [])) {
+        const st = stateAtTick(timeline, tick);
+        if (!st) continue;
+        const heroName = shortHeroName(timeline.hero_name);
+        const isAlive = Number(st.hp || 0) > 0;
+        const coord = (st.x === null || st.y === null) ? "-" : `${Number(st.x).toFixed(1)}, ${Number(st.y).toFixed(1)}`;
+        const hpText = `${Math.max(0, Number(st.hp || 0))}/${Math.max(0, Number(st.max_hp || 0))}`;
+        items.push({
+          objectKey: `hero:${Number(timeline.player_id)}`,
+          entityId: `hero:${Number(timeline.player_id)}`,
+          uid: `hero-${Number(timeline.player_id)}`,
+          tick,
+          name: heroName,
+          type: "hero.player",
+          glyph: "英",
+          activeText: isAlive ? "是" : "否",
+          activeClass: isAlive ? "active" : "inactive",
+          coord,
+          hpText,
+          team: String(timeline.team),
+          rawX: st.x,
+          rawY: st.y,
         });
       }
 
@@ -539,14 +590,31 @@ HTML_TEMPLATE = """<!doctype html>
         (debugFilterValues.hp === "ALL" || x.hpText === debugFilterValues.hp) &&
         (debugFilterValues.team === "ALL" || x.team === debugFilterValues.team)
       );
+      const pinnedItem = pinnedObjectKey === null
+        ? null
+        : items.find((x) => x.objectKey === pinnedObjectKey) || null;
+      const filteredWithPinned = (pinnedItem && !filtered.some((x) => x.objectKey === pinnedItem.objectKey))
+        ? [pinnedItem, ...filtered]
+        : filtered;
 
       const valueForSort = (item, key) => {
+        if (key === "uid") {
+          const n = Number(item.uid);
+          return Number.isFinite(n) ? n : String(item.uid);
+        }
+        if (key === "coord" && pinnedAnchorCoord !== null) {
+          return distanceBetween(
+            { x: item.rawX, y: item.rawY },
+            pinnedAnchorCoord
+          );
+        }
         if (key === "team") return Number(item.team);
         if (key === "hpText") return Number(String(item.hpText).split("/")[0] || 0);
         return String(item[key] ?? "");
       };
 
-      filtered.sort((a, b) => {
+      const sortableItems = filteredWithPinned.filter((x) => !(pinnedItem && x.objectKey === pinnedItem.objectKey));
+      sortableItems.sort((a, b) => {
         const av = valueForSort(a, debugSortState.key);
         const bv = valueForSort(b, debugSortState.key);
         let cmp = 0;
@@ -557,6 +625,7 @@ HTML_TEMPLATE = """<!doctype html>
         }
         return debugSortState.direction === "asc" ? cmp : -cmp;
       });
+      const sortedItems = pinnedItem ? [pinnedItem, ...sortableItems] : sortableItems;
 
       for (const btn of debugEntityHead.querySelectorAll(".debug-sort-btn")) {
         const key = btn.getAttribute("data-sort-key");
@@ -567,38 +636,75 @@ HTML_TEMPLATE = """<!doctype html>
         btn.textContent = `${baseLabel}${arrow}`;
       }
 
-      const rows = filtered.map((item) => `
-          <tr>
+      const rows = sortedItems.map((item) => `
+          <tr class="${pinnedItem && item.objectKey === pinnedItem.objectKey ? "pinned-row" : ""}">
             <td>${escapeHtml(item.name)}</td>
+            <td>${escapeHtml(item.uid)}</td>
             <td>${escapeHtml(item.type)}</td>
             <td>${escapeHtml(item.glyph)}</td>
             <td class="${item.activeClass}">${item.activeText}</td>
             <td>${escapeHtml(item.coord)}</td>
             <td>${escapeHtml(item.hpText)}</td>
             <td>${escapeHtml(item.team)}</td>
-            <td><button class="debug-btn" data-entity-id="${item.entityId}" data-tick="${item.tick}">详情</button></td>
+            <td><button class="debug-btn" data-object-key="${escapeHtml(item.objectKey)}" data-tick="${item.tick}">详情</button></td>
           </tr>
         `);
       debugEntityRows.innerHTML = rows.join("");
     };
 
-    const showEntityDebugModal = (entityId, tick) => {
+    const setPinnedObject = (objectKey, tick) => {
+      pinnedObjectKey = objectKey;
+      pinnedAnchorCoord = null;
+      if (String(objectKey).startsWith("entity:")) {
+        const entityId = Number(String(objectKey).slice("entity:".length));
+        const timeline = (data.entity_timelines || []).find((x) => Number(x.entity_id) === entityId);
+        const st = timeline ? stateAtTick(timeline, tick) : null;
+        if (st && st.x !== null && st.y !== null) pinnedAnchorCoord = { x: st.x, y: st.y };
+      } else if (String(objectKey).startsWith("hero:")) {
+        const playerId = Number(String(objectKey).slice("hero:".length));
+        const timeline = (data.player_timelines || []).find((x) => Number(x.player_id) === playerId);
+        const st = timeline ? stateAtTick(timeline, tick) : null;
+        if (st && st.x !== null && st.y !== null) pinnedAnchorCoord = { x: st.x, y: st.y };
+      }
+    };
+
+    const showObjectDebugModal = (objectKey, tick) => {
       if (!data) return;
-      const timeline = (data.entity_timelines || []).find((x) => Number(x.entity_id) === Number(entityId));
-      if (!timeline) return;
-      const st = stateAtTick(timeline, tick);
-      const detail = {
-        tick,
-        entity_id: timeline.entity_id,
-        entity_name: timeline.entity_name,
-        class_name: timeline.class_name,
-        team: timeline.team,
-        category: timeline.category,
-        subtype: timeline.subtype,
-        glyph: entityGlyph(timeline),
-        state_at_tick: st,
-      };
-      debugModalTitle.textContent = `对象详情 #${timeline.entity_id} @ Tick ${tick}`;
+      let detail = null;
+      if (String(objectKey).startsWith("entity:")) {
+        const entityId = Number(String(objectKey).slice("entity:".length));
+        const timeline = (data.entity_timelines || []).find((x) => Number(x.entity_id) === entityId);
+        if (!timeline) return;
+        const st = stateAtTick(timeline, tick);
+        detail = {
+          tick,
+          entity_id: timeline.entity_id,
+          entity_name: timeline.entity_name,
+          class_name: timeline.class_name,
+          team: timeline.team,
+          category: timeline.category,
+          subtype: timeline.subtype,
+          glyph: entityGlyph(timeline),
+          state_at_tick: st,
+        };
+        debugModalTitle.textContent = `对象详情 #${timeline.entity_id} @ Tick ${tick}`;
+      } else if (String(objectKey).startsWith("hero:")) {
+        const playerId = Number(String(objectKey).slice("hero:".length));
+        const timeline = (data.player_timelines || []).find((x) => Number(x.player_id) === playerId);
+        if (!timeline) return;
+        const st = stateAtTick(timeline, tick);
+        detail = {
+          tick,
+          player_id: timeline.player_id,
+          hero_name: timeline.hero_name,
+          player_name: timeline.player_name,
+          team: timeline.team,
+          state_at_tick: st,
+        };
+        debugModalTitle.textContent = `英雄详情 #${timeline.player_id} @ Tick ${tick}`;
+      } else {
+        return;
+      }
       debugModalJson.textContent = JSON.stringify(detail, null, 2);
       debugModal.classList.add("open");
     };
@@ -703,6 +809,9 @@ HTML_TEMPLATE = """<!doctype html>
       direction: "asc",
     };
     const mapBackgroundImage = new Image();
+    let renderedWorldEntityHitboxes = [];
+    let pinnedObjectKey = null;
+    let pinnedAnchorCoord = null;
     let mapBackgroundLoaded = false;
     // debug+DSR-MAPDBG-01: 底图加载开始与结束日志。
     debugLog("map-image-load-start", { src: "/assets/maps/map_full.png" });
@@ -826,6 +935,13 @@ HTML_TEMPLATE = """<!doctype html>
         if (death.is_dead || st.hp <= 0) continue;
 
         const [cx, cy] = mapToCanvas(st.x, st.y, data.map_bounds, canvas);
+        renderedWorldEntityHitboxes.push({
+          objectKey: `hero:${Number(timeline.player_id)}`,
+          tick,
+          cx,
+          cy,
+          radius: 11,
+        });
         ctx.beginPath();
         ctx.fillStyle = timeline.team === 2 ? "#4CAF50" : "#F44336";
         ctx.strokeStyle = "#ddd";
@@ -1009,11 +1125,34 @@ HTML_TEMPLATE = """<!doctype html>
     });
 
     debugEntityRows.addEventListener("click", (e) => {
-      const btn = e.target.closest("button[data-entity-id]");
+      const btn = e.target.closest("button[data-object-key]");
       if (!btn) return;
-      const entityId = Number(btn.getAttribute("data-entity-id"));
+      const objectKey = String(btn.getAttribute("data-object-key"));
       const tick = Number(btn.getAttribute("data-tick"));
-      showEntityDebugModal(entityId, tick);
+      showObjectDebugModal(objectKey, tick);
+    });
+    canvas.addEventListener("click", (e) => {
+      if (!data) return;
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      const px = (e.clientX - rect.left) * scaleX;
+      const py = (e.clientY - rect.top) * scaleY;
+      let hit = null;
+      for (let i = renderedWorldEntityHitboxes.length - 1; i >= 0; i -= 1) {
+        const h = renderedWorldEntityHitboxes[i];
+        const dx = px - h.cx;
+        const dy = py - h.cy;
+        if ((dx * dx + dy * dy) <= (h.radius * h.radius)) {
+          hit = h;
+          break;
+        }
+      }
+      if (hit) {
+        setPinnedObject(hit.objectKey, hit.tick);
+        debugPanelModal.classList.add("open");
+        renderDebugEntities(currentTick);
+      }
     });
     const onDebugFilterChange = () => {
       if (!data) return;
@@ -1047,13 +1186,22 @@ HTML_TEMPLATE = """<!doctype html>
       debugPanelModal.classList.add("open");
       if (data) renderDebugEntities(currentTick);
     });
-    debugPanelCloseBtn.addEventListener("click", () => debugPanelModal.classList.remove("open"));
+    const closeDebugPanelModal = () => {
+      debugPanelModal.classList.remove("open");
+      pinnedObjectKey = null;
+      pinnedAnchorCoord = null;
+      if (data) renderDebugEntities(currentTick);
+    };
+    debugPanelCloseBtn.addEventListener("click", closeDebugPanelModal);
     debugPanelModal.addEventListener("click", (e) => {
-      if (e.target === debugPanelModal) debugPanelModal.classList.remove("open");
+      if (e.target === debugPanelModal) closeDebugPanelModal();
     });
-    debugModalCloseBtn.addEventListener("click", () => debugModal.classList.remove("open"));
+    const closeDebugModal = () => {
+      debugModal.classList.remove("open");
+    };
+    debugModalCloseBtn.addEventListener("click", closeDebugModal);
     debugModal.addEventListener("click", (e) => {
-      if (e.target === debugModal) debugModal.classList.remove("open");
+      if (e.target === debugModal) closeDebugModal();
     });
 
     (async () => {
