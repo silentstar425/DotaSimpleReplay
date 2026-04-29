@@ -88,6 +88,10 @@ HTML_TEMPLATE = """<!doctype html>
       min-width: 44px;
       text-align: center;
     }
+    #visionTeamSelect {
+      width: 110px;
+      padding: 6px 8px;
+    }
     button {
       background: #2d6cdf;
       color: #fff;
@@ -257,6 +261,12 @@ HTML_TEMPLATE = """<!doctype html>
           <button id="openTrailSettingsBtn" style="background:#3a4d63;">轨迹设置</button>
           <button id="toggleHeatmapBtn" style="background:#3a4d63;">热力图：关</button>
           <button id="openHeatmapSettingsBtn" style="background:#3a4d63;">热力图设置</button>
+          <button id="toggleVisionBtn" style="background:#3a4d63;">视野：关</button>
+          <select id="visionTeamSelect">
+            <option value="both">双方视野</option>
+            <option value="team1">阵营1视野</option>
+            <option value="team2">阵营2视野</option>
+          </select>
         </div>
         <div class="control-row">
           <button id="playBtn">播放</button>
@@ -478,6 +488,7 @@ HTML_TEMPLATE = """<!doctype html>
         const st = stateAtTick(timeline, tick);
         // 地图层只绘制激活对象；未激活对象可在下方调试表查看。
         if (!st || st.x === null || st.y === null || !st.active) continue;
+        if (!isVisibleByVision(st.x, st.y, tick)) continue;
         const [cx, cy] = mapToCanvas(st.x, st.y, data.map_bounds, canvas);
         drawEntityGlyph(ctx, cx, cy, timeline);
 
@@ -534,6 +545,8 @@ HTML_TEMPLATE = """<!doctype html>
     const openTrailSettingsBtn = document.getElementById("openTrailSettingsBtn");
     const toggleHeatmapBtn = document.getElementById("toggleHeatmapBtn");
     const openHeatmapSettingsBtn = document.getElementById("openHeatmapSettingsBtn");
+    const toggleVisionBtn = document.getElementById("toggleVisionBtn");
+    const visionTeamSelect = document.getElementById("visionTeamSelect");
     const boardMetric = document.getElementById("boardMetric");
     const boardList = document.getElementById("boardList");
     const statusList = document.getElementById("statusList");
@@ -589,6 +602,25 @@ HTML_TEMPLATE = """<!doctype html>
       radius: 36,
       opacity: 0.18,
       durationSec: 60,
+    };
+    const mapView = {
+      zoom: 1.0,
+      minZoom: 1.0,
+      maxZoom: 4.0,
+      panX: 0.0,
+      panY: 0.0,
+      dragging: false,
+      lastX: 0.0,
+      lastY: 0.0,
+    };
+    const visionSettings = {
+      enabled: false,
+      mode: "both",
+      heroVisionRadius: 1600,
+      treeRadius: 70,
+      treeBlockers: [],
+      team1: 2,
+      team2: 3,
     };
 
     let data = null;
@@ -673,10 +705,122 @@ HTML_TEMPLATE = """<!doctype html>
       return { sourceX, sourceY, cropWidth, cropHeight };
     };
 
+    const applyMapViewTransform = () => {
+      const centerX = canvas.width / 2;
+      const centerY = canvas.height / 2;
+      ctx.translate(centerX + mapView.panX, centerY + mapView.panY);
+      ctx.scale(mapView.zoom, mapView.zoom);
+      ctx.translate(-centerX, -centerY);
+    };
+
+    const screenToPreView = (screenX, screenY) => {
+      const centerX = canvas.width / 2;
+      const centerY = canvas.height / 2;
+      return {
+        x: (screenX - centerX - mapView.panX) / mapView.zoom + centerX,
+        y: (screenY - centerY - mapView.panY) / mapView.zoom + centerY,
+      };
+    };
+
+    const updateVisionTeamOptions = () => {
+      const teams = [...new Set((data?.player_timelines || []).map((x) => Number(x.team)))].sort((a, b) => a - b);
+      visionSettings.team1 = teams[0] ?? 2;
+      visionSettings.team2 = teams[1] ?? teams[0] ?? 3;
+      const team1Label = `阵营1视野(T${visionSettings.team1})`;
+      const team2Label = `阵营2视野(T${visionSettings.team2})`;
+      visionTeamSelect.innerHTML = `
+        <option value="both">双方视野</option>
+        <option value="team1">${team1Label}</option>
+        <option value="team2">${team2Label}</option>
+      `;
+      visionTeamSelect.value = visionSettings.mode;
+      visionTeamSelect.disabled = !visionSettings.enabled;
+    };
+
+    const initTreeBlockers = () => {
+      if (!data) return;
+      const trees = [];
+      const spanX = data.map_bounds.max_x - data.map_bounds.min_x;
+      const spanY = data.map_bounds.max_y - data.map_bounds.min_y;
+      const cols = 28;
+      const rows = 28;
+      for (let r = 2; r < rows - 2; r += 1) {
+        for (let c = 2; c < cols - 2; c += 1) {
+          // 规则化伪随机分布，避免每次刷新树位变化。
+          const seed = (r * 73856093) ^ (c * 19349663);
+          if ((seed % 100) > 22) continue;
+          const jx = ((seed % 7) - 3) / 7;
+          const jy = (((seed >> 3) % 7) - 3) / 7;
+          const nx = (c + 0.5 + jx * 0.3) / cols;
+          const ny = (r + 0.5 + jy * 0.3) / rows;
+          trees.push({
+            x: data.map_bounds.min_x + nx * spanX,
+            y: data.map_bounds.min_y + ny * spanY,
+          });
+        }
+      }
+      visionSettings.treeBlockers = trees;
+    };
+
+    const pointSegmentDistSq = (px, py, x1, y1, x2, y2) => {
+      const vx = x2 - x1;
+      const vy = y2 - y1;
+      const wx = px - x1;
+      const wy = py - y1;
+      const c1 = vx * wx + vy * wy;
+      if (c1 <= 0) return (px - x1) ** 2 + (py - y1) ** 2;
+      const c2 = vx * vx + vy * vy;
+      if (c2 <= c1) return (px - x2) ** 2 + (py - y2) ** 2;
+      const t = c1 / c2;
+      const projX = x1 + t * vx;
+      const projY = y1 + t * vy;
+      return (px - projX) ** 2 + (py - projY) ** 2;
+    };
+
+    const isSightBlockedByTree = (sx, sy, tx, ty) => {
+      const radiusSq = visionSettings.treeRadius * visionSettings.treeRadius;
+      for (const tree of visionSettings.treeBlockers) {
+        if (pointSegmentDistSq(tree.x, tree.y, sx, sy, tx, ty) <= radiusSq) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    const getVisionSourceTimelines = () => {
+      if (!data) return [];
+      if (visionSettings.mode === "team1") {
+        return data.player_timelines.filter((x) => Number(x.team) === visionSettings.team1);
+      }
+      if (visionSettings.mode === "team2") {
+        return data.player_timelines.filter((x) => Number(x.team) === visionSettings.team2);
+      }
+      return data.player_timelines;
+    };
+
+    const isVisibleByVision = (x, y, tick) => {
+      if (!visionSettings.enabled) return true;
+      const sources = getVisionSourceTimelines();
+      const radiusSq = visionSettings.heroVisionRadius * visionSettings.heroVisionRadius;
+      for (const source of sources) {
+        const st = stateAtTick(source, tick);
+        if (!st || st.x === null || st.y === null || st.hp <= 0) continue;
+        const death = deathInfoAtTick(source, tick);
+        if (death.is_dead) continue;
+        const dx = x - st.x;
+        const dy = y - st.y;
+        if ((dx * dx + dy * dy) > radiusSq) continue;
+        if (!isSightBlockedByTree(st.x, st.y, x, y)) return true;
+      }
+      return false;
+    };
+
     const renderMap = (tick) => {
       resizeCanvasToMapAspect();
       ctx.fillStyle = "#111";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.save();
+      applyMapViewTransform();
       if (mapBackgroundLoaded) {
         const crop = getMapCropRect(mapBackgroundImage);
         ctx.save();
@@ -727,6 +871,7 @@ HTML_TEMPLATE = """<!doctype html>
         if (!st || st.x === null || st.y === null) continue;
         const death = deathInfoAtTick(timeline, tick);
         if (death.is_dead || st.hp <= 0) continue;
+        if (!isVisibleByVision(st.x, st.y, tick)) continue;
 
         const [cx, cy] = mapToCanvas(st.x, st.y, data.map_bounds, canvas);
         ctx.beginPath();
@@ -739,6 +884,7 @@ HTML_TEMPLATE = """<!doctype html>
         ctx.font = "12px Arial";
         ctx.fillText(shortHeroName(timeline.hero_name), cx + 9, cy - 9);
       }
+      ctx.restore();
     };
 
     const ensureHeroSelectionInitialized = () => {
@@ -776,6 +922,7 @@ HTML_TEMPLATE = """<!doctype html>
           heroTrailSettings.sampleEveryTicks
         );
         for (const pt of pts) {
+          if (!isVisibleByVision(pt.x, pt.y, tick)) continue;
           const [cx, cy] = mapToCanvas(pt.x, pt.y, data.map_bounds, canvas);
           let alpha = 0.85;
           if (heroTrailSettings.fadeOut) {
@@ -805,6 +952,7 @@ HTML_TEMPLATE = """<!doctype html>
           intervalTicks
         );
         for (const pt of pts) {
+          if (!isVisibleByVision(pt.x, pt.y, tick)) continue;
           const [cx, cy] = mapToCanvas(pt.x, pt.y, data.map_bounds, canvas);
           ctx.save();
           ctx.globalAlpha = Math.max(0.01, Math.min(1, heatmapSettings.opacity));
@@ -822,6 +970,10 @@ HTML_TEMPLATE = """<!doctype html>
     };
     const updateHeatmapToggleText = () => {
       toggleHeatmapBtn.textContent = `热力图：${heatmapSettings.enabled ? "开" : "关"}`;
+    };
+    const updateVisionToggleText = () => {
+      toggleVisionBtn.textContent = `视野：${visionSettings.enabled ? "开" : "关"}`;
+      visionTeamSelect.disabled = !visionSettings.enabled;
     };
 
     const rebuildTrailHeroFilterUI = () => {
@@ -991,6 +1143,15 @@ HTML_TEMPLATE = """<!doctype html>
     seekForward10Btn.addEventListener("click", () => seekBySeconds(10));
     speedHalfBtn.addEventListener("click", () => setPlaybackSpeed(0.5));
     speedDoubleBtn.addEventListener("click", () => setPlaybackSpeed(2.0));
+    toggleVisionBtn.addEventListener("click", () => {
+      visionSettings.enabled = !visionSettings.enabled;
+      updateVisionToggleText();
+      if (data) render(currentTick);
+    });
+    visionTeamSelect.addEventListener("change", () => {
+      visionSettings.mode = visionTeamSelect.value;
+      if (data) render(currentTick);
+    });
 
     slider.addEventListener("input", (e) => {
       if (!data) return;
@@ -1088,6 +1249,46 @@ HTML_TEMPLATE = """<!doctype html>
     heatmapOpacityInput.addEventListener("change", applyHeatmapNumberInput);
     heatmapWindowSecInput.addEventListener("change", applyHeatmapNumberInput);
 
+    canvas.addEventListener("mousedown", (e) => {
+      mapView.dragging = true;
+      mapView.lastX = e.clientX;
+      mapView.lastY = e.clientY;
+      canvas.style.cursor = "grabbing";
+    });
+    window.addEventListener("mouseup", () => {
+      mapView.dragging = false;
+      canvas.style.cursor = "grab";
+    });
+    canvas.addEventListener("mouseleave", () => {
+      mapView.dragging = false;
+      canvas.style.cursor = "grab";
+    });
+    canvas.addEventListener("mousemove", (e) => {
+      if (!mapView.dragging) return;
+      const dx = e.clientX - mapView.lastX;
+      const dy = e.clientY - mapView.lastY;
+      mapView.panX += dx;
+      mapView.panY += dy;
+      mapView.lastX = e.clientX;
+      mapView.lastY = e.clientY;
+      if (data) render(currentTick);
+    });
+    canvas.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      const sx = e.clientX - rect.left;
+      const sy = e.clientY - rect.top;
+      const pre = screenToPreView(sx, sy);
+      const delta = e.deltaY < 0 ? 1.1 : 0.9;
+      mapView.zoom = Math.max(mapView.minZoom, Math.min(mapView.maxZoom, mapView.zoom * delta));
+      const centerX = canvas.width / 2;
+      const centerY = canvas.height / 2;
+      mapView.panX = sx - (pre.x - centerX) * mapView.zoom - centerX;
+      mapView.panY = sy - (pre.y - centerY) * mapView.zoom - centerY;
+      if (data) render(currentTick);
+    }, { passive: false });
+    canvas.style.cursor = "grab";
+
 
     clearCacheBtn.addEventListener("click", async () => {
       if (!data) return;
@@ -1131,12 +1332,15 @@ HTML_TEMPLATE = """<!doctype html>
       slider.value = "0";
       fpsInput.value = String(data.playback_fps || 30);
       updateSpeedUI();
+      initTreeBlockers();
+      updateVisionTeamOptions();
       ensureHeroSelectionInitialized();
       rebuildTrailHeroFilterUI();
       applyTrailNumberInput();
       applyHeatmapNumberInput();
       updateTrailToggleText();
       updateHeatmapToggleText();
+      updateVisionToggleText();
       renderFromFloat(0);
       debugLog("bootstrap-render-called");
     })();
