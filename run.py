@@ -17,9 +17,11 @@ import bz2
 import json
 import sys
 import webbrowser
+from collections import defaultdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 import gem
 from gem.extractors.players import PlayerExtractor
@@ -259,6 +261,7 @@ HTML_TEMPLATE = """<!doctype html>
         <button id="playBtn">播放</button>
         <button id="clearCacheBtn" style="background:#8b1e2d;">清理缓存</button>
         <button id="openDebugPanelBtn" style="background:#3a4d63;">调试对象</button>
+        <button id="openRawFrameBtn" style="background:#3a4d63;">原始帧信息</button>
         <input id="slider" type="range" min="0" max="1" step="1" value="0" />
         <label for="fpsInput" class="small-muted">刷新率(FPS)</label>
         <input id="fpsInput" type="number" min="1" max="240" step="1" value="30" style="width: 76px;" />
@@ -315,6 +318,18 @@ HTML_TEMPLATE = """<!doctype html>
           <tbody id="debugEntityRows"></tbody>
         </table>
       </section>
+    </div>
+  </div>
+  <div id="rawFrameModal" class="debug-modal">
+    <div class="debug-modal-body">
+      <div class="debug-modal-header">
+        <div id="rawFrameModalTitle" class="debug-modal-title">原始帧信息</div>
+        <div style="display:flex; gap:8px;">
+          <button id="copyRawFrameBtn" class="debug-btn">复制全部</button>
+          <button id="rawFrameCloseBtn" class="debug-btn">关闭</button>
+        </div>
+      </div>
+      <pre id="rawFrameJson" class="debug-json"></pre>
     </div>
   </div>
 
@@ -741,6 +756,7 @@ HTML_TEMPLATE = """<!doctype html>
     const tickLine = document.getElementById("tickLine");
     const playBtn = document.getElementById("playBtn");
     const openDebugPanelBtn = document.getElementById("openDebugPanelBtn");
+    const openRawFrameBtn = document.getElementById("openRawFrameBtn");
     const slider = document.getElementById("slider");
     const clearCacheBtn = document.getElementById("clearCacheBtn");
     const boardMetric = document.getElementById("boardMetric");
@@ -764,6 +780,11 @@ HTML_TEMPLATE = """<!doctype html>
     const debugFilterHp = document.getElementById("debugFilterHp");
     const debugFilterTeam = document.getElementById("debugFilterTeam");
     const debugEntityHead = document.getElementById("debugEntityHead");
+    const rawFrameModal = document.getElementById("rawFrameModal");
+    const rawFrameModalTitle = document.getElementById("rawFrameModalTitle");
+    const rawFrameJson = document.getElementById("rawFrameJson");
+    const copyRawFrameBtn = document.getElementById("copyRawFrameBtn");
+    const rawFrameCloseBtn = document.getElementById("rawFrameCloseBtn");
     // debug+DSR-MAPDBG-01: 统一调试 ID，用于定位“页面打开到地图可见”的耗时链路。
     const debugId = "debug+DSR-MAPDBG-01";
     const pageBootMs = performance.now();
@@ -1186,6 +1207,23 @@ HTML_TEMPLATE = """<!doctype html>
       debugPanelModal.classList.add("open");
       if (data) renderDebugEntities(currentTick);
     });
+    openRawFrameBtn.addEventListener("click", async () => {
+      if (!data) return;
+      rawFrameModalTitle.textContent = `原始帧信息 @ Tick ${currentTick}`;
+      rawFrameJson.textContent = "正在读取该帧原始信息...";
+      rawFrameModal.classList.add("open");
+      try {
+        const res = await fetch(`/raw_frame?tick=${encodeURIComponent(String(currentTick))}`);
+        const obj = await res.json();
+        rawFrameJson.textContent = JSON.stringify(obj, null, 2);
+      } catch (err) {
+        rawFrameJson.textContent = JSON.stringify(
+          { error: `读取原始帧信息失败: ${String(err)}`, tick: currentTick },
+          null,
+          2
+        );
+      }
+    });
     const closeDebugPanelModal = () => {
       debugPanelModal.classList.remove("open");
       pinnedObjectKey = null;
@@ -1202,6 +1240,30 @@ HTML_TEMPLATE = """<!doctype html>
     debugModalCloseBtn.addEventListener("click", closeDebugModal);
     debugModal.addEventListener("click", (e) => {
       if (e.target === debugModal) closeDebugModal();
+    });
+    const closeRawFrameModal = () => {
+      rawFrameModal.classList.remove("open");
+    };
+    rawFrameCloseBtn.addEventListener("click", closeRawFrameModal);
+    rawFrameModal.addEventListener("click", (e) => {
+      if (e.target === rawFrameModal) closeRawFrameModal();
+    });
+    copyRawFrameBtn.addEventListener("click", async () => {
+      const text = rawFrameJson.textContent || "";
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch (_err) {
+        // 回退方案，兼容部分浏览器环境
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+      }
     });
 
     (async () => {
@@ -1557,6 +1619,61 @@ def run_server(host: str, port: int, payload: dict[str, Any], dem_path: Path, op
         return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
     html_bytes = HTML_TEMPLATE.encode("utf-8")
+    raw_tick_cache: dict[int, dict[str, Any]] = {}
+    raw_frame_index: dict[int, dict[str, list[dict[str, Any]]]] | None = None
+
+    def _coerce_json_value(value: Any) -> Any:
+        if hasattr(value, "item"):
+            try:
+                value = value.item()
+            except Exception:
+                pass
+        return value
+
+    def _derive_row_tick(row: dict[str, Any], game_start_tick: int, tick_rate: float) -> int | None:
+        if "tick" in row and row["tick"] is not None:
+            return int(row["tick"])
+        if "start_tick" in row and row["start_tick"] is not None:
+            return int(row["start_tick"])
+        if "minute" in row and row["minute"] is not None:
+            return int(round(game_start_tick + float(row["minute"]) * 60.0 * tick_rate))
+        return None
+
+    def _ensure_raw_frame_index() -> dict[int, dict[str, list[dict[str, Any]]]]:
+        nonlocal raw_frame_index
+        if raw_frame_index is not None:
+            return raw_frame_index
+        print("[info] 按需读取原始帧数据索引...")
+        dfs = gem.parse_to_dataframe(str(dem_path))
+        game_start_tick = int(payload.get("game_start_tick", 0))
+        tick_rate = float(payload.get("tick_rate", 30.0) or 30.0)
+        index: dict[int, dict[str, list[dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
+        for table_name, df in dfs.items():
+            if len(getattr(df, "columns", [])) == 0:
+                continue
+            for row in df.to_dict(orient="records"):
+                row_tick = _derive_row_tick(row, game_start_tick, tick_rate)
+                if row_tick is None:
+                    continue
+                index[int(row_tick)][table_name].append(
+                    {str(col): _coerce_json_value(val) for col, val in row.items()}
+                )
+        raw_frame_index = {k: dict(v) for k, v in index.items()}
+        return raw_frame_index
+
+    def _raw_frame_payload_for_tick(tick: int) -> dict[str, Any]:
+        if tick in raw_tick_cache:
+            return raw_tick_cache[tick]
+        index = _ensure_raw_frame_index()
+        frame_tables = index.get(int(tick), {})
+        body = {
+            "tick": int(tick),
+            "game_time_seconds": round((int(tick) - int(payload["game_start_tick"])) / float(payload["tick_rate"]), 3),
+            "table_count": len(frame_tables),
+            "tables": frame_tables,
+        }
+        raw_tick_cache[tick] = body
+        return body
     # debug+DSR-MAPDBG-01: 服务端静态底图读取与请求日志，定位是否卡在图片传输。
     map_bg_path = Path(__file__).resolve().parent / "assets" / "maps" / "map_full.png"
     map_bg_bytes = map_bg_path.read_bytes() if map_bg_path.exists() else None
@@ -1567,14 +1684,15 @@ def run_server(host: str, port: int, payload: dict[str, Any], dem_path: Path, op
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
-            if self.path == "/" or self.path.startswith("/?"):
+            parsed = urlparse(self.path)
+            if parsed.path == "/" or self.path.startswith("/?"):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(html_bytes)))
                 self.end_headers()
                 self.wfile.write(html_bytes)
                 return
-            if self.path == "/data":
+            if parsed.path == "/data":
                 payload_bytes = current_payload_bytes()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -1582,7 +1700,36 @@ def run_server(host: str, port: int, payload: dict[str, Any], dem_path: Path, op
                 self.end_headers()
                 self.wfile.write(payload_bytes)
                 return
-            if self.path == "/assets/maps/map_full.png":
+            if parsed.path == "/raw_frame":
+                query = parse_qs(parsed.query)
+                tick_raw = (query.get("tick") or [None])[0]
+                if tick_raw is None:
+                    err = json.dumps({"error": "missing tick query parameter"}, ensure_ascii=False).encode("utf-8")
+                    self.send_response(400)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.send_header("Content-Length", str(len(err)))
+                    self.end_headers()
+                    self.wfile.write(err)
+                    return
+                try:
+                    tick = int(tick_raw)
+                except ValueError:
+                    err = json.dumps({"error": f"invalid tick: {tick_raw}"}, ensure_ascii=False).encode("utf-8")
+                    self.send_response(400)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.send_header("Content-Length", str(len(err)))
+                    self.end_headers()
+                    self.wfile.write(err)
+                    return
+                frame_obj = _raw_frame_payload_for_tick(tick)
+                body = json.dumps(frame_obj, ensure_ascii=False).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if parsed.path == "/assets/maps/map_full.png":
                 if map_bg_bytes is None:
                     print("[debug+DSR-MAPDBG-01] map-bg-request missing")
                     self.send_response(404)
