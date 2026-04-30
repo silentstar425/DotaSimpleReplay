@@ -15,9 +15,14 @@ from __future__ import annotations
 import argparse
 import bz2
 import json
+import re
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -234,6 +239,48 @@ HTML_TEMPLATE = """<!doctype html>
       margin-top: 8px;
     }
     .btn-secondary { background: #3a4d63; }
+    .replay-table-wrap {
+      border: 1px solid #2f3946;
+      border-radius: 6px;
+      max-height: 340px;
+      overflow: auto;
+      background: #0b1119;
+    }
+    .replay-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+    .replay-table th, .replay-table td {
+      border-bottom: 1px solid #232a33;
+      padding: 8px 6px;
+      text-align: left;
+      white-space: nowrap;
+    }
+    .replay-table th {
+      color: #bdd1e7;
+      position: sticky;
+      top: 0;
+      background: #111b28;
+      z-index: 1;
+    }
+    .replay-status-ok { color: #6bd38a; font-weight: bold; }
+    .replay-status-pending { color: #ffd479; font-weight: bold; }
+    .replay-status-bad { color: #ff9a9a; font-weight: bold; }
+    .inline-form {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .inline-form input {
+      min-width: 240px;
+    }
+    .muted-line {
+      font-size: 12px;
+      color: #9ba7b6;
+      margin-bottom: 8px;
+    }
   </style>
 </head>
 <body>
@@ -256,6 +303,8 @@ HTML_TEMPLATE = """<!doctype html>
       <div class="meta" id="tickLine"></div>
       <div class="controls">
         <div class="control-row">
+          <button id="openReplaySelectBtn" style="background:#3a4d63;">录像选择</button>
+          <button id="openReplayDownloadBtn" style="background:#3a4d63;">按ID下载录像</button>
           <button id="clearCacheBtn" style="background:#8b1e2d;">清理缓存</button>
           <button id="toggleTrailBtn" style="background:#3a4d63;">轨迹：关</button>
           <button id="openTrailSettingsBtn" style="background:#3a4d63;">轨迹设置</button>
@@ -334,6 +383,45 @@ HTML_TEMPLATE = """<!doctype html>
         <label for="heatmapWindowSecInput">时间范围（最近多少秒）</label>
         <input id="heatmapWindowSecInput" type="number" min="1" max="300" step="1" value="60" />
       </div>
+    </div>
+  </div>
+  <div id="replaySelectModal" class="settings-modal">
+    <div class="settings-body" style="width:min(980px, 95vw);">
+      <div class="settings-title">
+        <span>录像选择</span>
+        <button id="replaySelectCloseBtn" class="btn-secondary">关闭</button>
+      </div>
+      <div class="muted-line">列表包含录像编号、下载时间、解析状态、解析按钮和播放按钮（仅可播放已解析录像）。</div>
+      <div id="replaySelectError" class="muted-line" style="color:#ff9a9a; display:none;"></div>
+      <div class="replay-table-wrap">
+        <table class="replay-table">
+          <thead>
+            <tr>
+              <th>录像编号</th>
+              <th>下载时间</th>
+              <th>解析状态</th>
+              <th>解析按钮</th>
+              <th>播放按钮</th>
+            </tr>
+          </thead>
+          <tbody id="replayTableBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+  <div id="replayDownloadModal" class="settings-modal">
+    <div class="settings-body" style="width:min(700px, 92vw);">
+      <div class="settings-title">
+        <span>使用录像 ID 下载录像文件</span>
+        <button id="replayDownloadCloseBtn" class="btn-secondary">关闭</button>
+      </div>
+      <div class="muted-line">输入 Dota2 比赛录像 ID，下载成功后会自动刷新录像列表。</div>
+      <div class="inline-form">
+        <label for="replayIdInput">录像ID</label>
+        <input id="replayIdInput" type="text" placeholder="例如：8781301871" />
+        <button id="downloadReplayByIdBtn">下载</button>
+      </div>
+      <div id="replayDownloadResult" class="muted-line" style="margin-top:10px;"></div>
     </div>
   </div>
 
@@ -541,6 +629,8 @@ HTML_TEMPLATE = """<!doctype html>
     const speedIndicator = document.getElementById("speedIndicator");
     const slider = document.getElementById("slider");
     const clearCacheBtn = document.getElementById("clearCacheBtn");
+    const openReplaySelectBtn = document.getElementById("openReplaySelectBtn");
+    const openReplayDownloadBtn = document.getElementById("openReplayDownloadBtn");
     const toggleTrailBtn = document.getElementById("toggleTrailBtn");
     const openTrailSettingsBtn = document.getElementById("openTrailSettingsBtn");
     const toggleHeatmapBtn = document.getElementById("toggleHeatmapBtn");
@@ -568,6 +658,15 @@ HTML_TEMPLATE = """<!doctype html>
     const heatmapRadiusInput = document.getElementById("heatmapRadiusInput");
     const heatmapOpacityInput = document.getElementById("heatmapOpacityInput");
     const heatmapWindowSecInput = document.getElementById("heatmapWindowSecInput");
+    const replaySelectModal = document.getElementById("replaySelectModal");
+    const replaySelectCloseBtn = document.getElementById("replaySelectCloseBtn");
+    const replayTableBody = document.getElementById("replayTableBody");
+    const replaySelectError = document.getElementById("replaySelectError");
+    const replayDownloadModal = document.getElementById("replayDownloadModal");
+    const replayDownloadCloseBtn = document.getElementById("replayDownloadCloseBtn");
+    const replayIdInput = document.getElementById("replayIdInput");
+    const downloadReplayByIdBtn = document.getElementById("downloadReplayByIdBtn");
+    const replayDownloadResult = document.getElementById("replayDownloadResult");
     // debug+DSR-MAPDBG-01: 统一调试 ID，用于定位“页面打开到地图可见”的耗时链路。
     const debugId = "debug+DSR-MAPDBG-01";
     const pageBootMs = performance.now();
@@ -635,6 +734,7 @@ HTML_TEMPLATE = """<!doctype html>
     let hasLoggedMapWait = false;
     let hasLoggedCropRect = false;
     let hasLoggedResize = false;
+    let replayListCache = [];
     const mapBackgroundImage = new Image();
     let mapBackgroundLoaded = false;
     // debug+DSR-MAPDBG-01: 底图加载开始与结束日志。
@@ -889,6 +989,7 @@ HTML_TEMPLATE = """<!doctype html>
 
     const ensureHeroSelectionInitialized = () => {
       if (!data || heroSelectionInitialized) return;
+      heroTrailSettings.selectedHeroes.clear();
       for (const timeline of data.player_timelines) {
         heroTrailSettings.selectedHeroes.add(timeline.hero_name);
       }
@@ -1134,10 +1235,184 @@ HTML_TEMPLATE = """<!doctype html>
       }, delay);
     };
 
+    const formatDownloadTime = (raw) => {
+      if (!raw) return "-";
+      try {
+        return new Date(raw).toLocaleString("zh-CN", { hour12: false });
+      } catch (err) {
+        return raw;
+      }
+    };
+
+    const statusClass = (parsed, parse_error) => {
+      if (parsed) return "replay-status-ok";
+      if (parse_error) return "replay-status-bad";
+      return "replay-status-pending";
+    };
+
+    const statusText = (parsed, parse_error) => {
+      if (parsed) return "已解析";
+      if (parse_error) return "解析失败";
+      return "未解析";
+    };
+
+    const loadReplayRecord = async (record) => {
+      if (!record || !record.dem_path) return;
+      try {
+        const res = await fetch("/load_replay", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ dem_path: record.dem_path }),
+        });
+        const obj = await res.json();
+        if (!res.ok || !obj || !obj.ok) {
+          throw new Error((obj && obj.error) || `HTTP ${res.status}`);
+        }
+        data = obj.payload;
+        titleLine.textContent = `Dota2 回放可视化（Match ${data.match_id}）`;
+        slider.min = "0";
+        slider.max = String(data.game_end_tick);
+        slider.value = "0";
+        fpsInput.value = String(data.playback_fps || 30);
+        stopPlayback();
+        currentTick = 0;
+        currentTickFloat = 0;
+        initTreeBlockers();
+        updateVisionTeamOptions();
+        ensureHeroSelectionInitialized();
+        rebuildTrailHeroFilterUI();
+        renderFromFloat(0);
+      } catch (err) {
+        alert(`加载录像失败：${String(err)}`);
+      }
+    };
+
+    const parseReplay = async (record) => {
+      if (!record || !record.dem_path) return;
+      try {
+        const res = await fetch("/parse_replay", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ dem_path: record.dem_path }),
+        });
+        const obj = await res.json();
+        if (!res.ok || !obj || !obj.ok) {
+          throw new Error((obj && obj.error) || `HTTP ${res.status}`);
+        }
+        await loadReplayList();
+      } catch (err) {
+        alert(`解析失败：${String(err)}`);
+      }
+    };
+
+    const renderReplayTable = () => {
+      replayTableBody.innerHTML = replayListCache.map((record, idx) => {
+        const parsed = Boolean(record.parsed);
+        const statusCls = statusClass(parsed, record.parse_error);
+        const parseDisabled = parsed ? "disabled" : "";
+        const playDisabled = parsed ? "" : "disabled";
+        return `
+          <tr>
+            <td>${escapeHtml(record.replay_id || `#${idx + 1}`)}</td>
+            <td>${escapeHtml(formatDownloadTime(record.downloaded_at))}</td>
+            <td><span class="${statusCls}">${escapeHtml(statusText(parsed, record.parse_error))}</span></td>
+            <td><button data-action="parse" data-idx="${idx}" ${parseDisabled}>解析</button></td>
+            <td><button data-action="play" data-idx="${idx}" ${playDisabled}>播放</button></td>
+          </tr>
+        `;
+      }).join("");
+    };
+
+    const loadReplayList = async () => {
+      replaySelectError.style.display = "none";
+      replaySelectError.textContent = "";
+      try {
+        const res = await fetch("/replays");
+        const obj = await res.json();
+        if (!res.ok || !obj || !Array.isArray(obj.replays)) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+        replayListCache = obj.replays;
+        const currentDemPath = String((data && data.dem_path) || "");
+        for (const record of replayListCache) {
+          if (String(record.dem_path || "") === currentDemPath) {
+            record.parsed = true;
+          }
+        }
+        renderReplayTable();
+      } catch (err) {
+        replayListCache = [];
+        replayTableBody.innerHTML = "";
+        replaySelectError.style.display = "block";
+        replaySelectError.textContent = `加载录像列表失败：${String(err)}`;
+      }
+    };
+
     playBtn.addEventListener("click", () => {
       if (!data) return;
       if (playing) stopPlayback();
       else startPlayback();
+    });
+    openReplaySelectBtn.addEventListener("click", async () => {
+      replaySelectModal.classList.add("open");
+      await loadReplayList();
+    });
+    replaySelectCloseBtn.addEventListener("click", () => replaySelectModal.classList.remove("open"));
+    replaySelectModal.addEventListener("click", (e) => {
+      if (e.target === replaySelectModal) replaySelectModal.classList.remove("open");
+    });
+    replayTableBody.addEventListener("click", async (e) => {
+      const target = e.target;
+      if (!(target instanceof HTMLButtonElement)) return;
+      const action = target.getAttribute("data-action");
+      const idx = Number(target.getAttribute("data-idx"));
+      if (!Number.isFinite(idx) || idx < 0 || idx >= replayListCache.length) return;
+      const record = replayListCache[idx];
+      if (action === "parse") {
+        await parseReplay(record);
+      } else if (action === "play") {
+        if (!record.parsed) {
+          alert("仅可播放已解析的录像。");
+          return;
+        }
+        await loadReplayRecord(record);
+        replaySelectModal.classList.remove("open");
+      }
+    });
+    openReplayDownloadBtn.addEventListener("click", () => {
+      replayDownloadResult.textContent = "";
+      replayDownloadModal.classList.add("open");
+    });
+    replayDownloadCloseBtn.addEventListener("click", () => replayDownloadModal.classList.remove("open"));
+    replayDownloadModal.addEventListener("click", (e) => {
+      if (e.target === replayDownloadModal) replayDownloadModal.classList.remove("open");
+    });
+    downloadReplayByIdBtn.addEventListener("click", async () => {
+      const replayId = String(replayIdInput.value || "").trim();
+      if (!/^[0-9]{6,}$/.test(replayId)) {
+        replayDownloadResult.style.color = "#ff9a9a";
+        replayDownloadResult.textContent = "请输入合法的数字录像ID。";
+        return;
+      }
+      replayDownloadResult.style.color = "#9ba7b6";
+      replayDownloadResult.textContent = "正在下载，请稍候...";
+      try {
+        const res = await fetch("/download_replay_by_id", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ replay_id: replayId }),
+        });
+        const obj = await res.json();
+        if (!res.ok || !obj || !obj.ok) {
+          throw new Error((obj && obj.error) || `HTTP ${res.status}`);
+        }
+        replayDownloadResult.style.color = "#6bd38a";
+        replayDownloadResult.textContent = `下载成功：${obj.file_path}`;
+        await loadReplayList();
+      } catch (err) {
+        replayDownloadResult.style.color = "#ff9a9a";
+        replayDownloadResult.textContent = `下载失败：${String(err)}`;
+      }
     });
     seekBack10Btn.addEventListener("click", () => seekBySeconds(-10));
     seekForward10Btn.addEventListener("click", () => seekBySeconds(10));
@@ -1669,11 +1944,77 @@ def build_gui_payload(replay_path: Path, playback_fps: int) -> tuple[dict[str, A
     return payload, dem_path
 
 
+def _safe_replay_id_from_name(name: str) -> str:
+    match = re.search(r"(\d{6,})", name)
+    if match:
+        return match.group(1)
+    return name
+
+
+def list_replay_records(replay_dir: Path) -> list[dict[str, Any]]:
+    replay_dir.mkdir(parents=True, exist_ok=True)
+    files = sorted(
+        list(replay_dir.glob("*.dem")) + list(replay_dir.glob("*.dem.bz2")),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    rows: list[dict[str, Any]] = []
+    for path in files:
+        downloaded_at = datetime.fromtimestamp(path.stat().st_mtime).isoformat()
+        parsed = False
+        parse_error = ""
+        try:
+            dem_path = ensure_dem_path(path)
+            parsed = load_replay_cache(dem_path) is not None
+        except Exception as exc:
+            parse_error = str(exc)
+        rows.append(
+            {
+                "replay_id": _safe_replay_id_from_name(path.stem),
+                "file_name": path.name,
+                "file_path": str(path.resolve()),
+                "dem_path": str(path.resolve()),
+                "downloaded_at": downloaded_at,
+                "parsed": parsed,
+                "parse_error": parse_error,
+            }
+        )
+    return rows
+
+
+def download_replay_by_id(replay_id: str, replay_dir: Path) -> Path:
+    rid = replay_id.strip()
+    if not re.fullmatch(r"\d{6,}", rid):
+        raise ValueError("录像ID必须是至少6位数字。")
+    replay_dir.mkdir(parents=True, exist_ok=True)
+    output_path = replay_dir / f"match_{rid}.dem.bz2"
+    url = f"https://api.opendota.com/api/replays?match_id={rid}"
+    with urllib.request.urlopen(url, timeout=20) as resp:
+        payload = json.loads(resp.read().decode("utf-8"))
+    if not isinstance(payload, list) or not payload:
+        raise RuntimeError("未查询到可下载录像信息。")
+    item = payload[0]
+    cluster = item.get("cluster")
+    replay_salt = item.get("replay_salt")
+    if cluster is None or replay_salt is None:
+        raise RuntimeError("查询结果缺少 cluster 或 replay_salt。")
+    replay_url = f"https://replay{int(cluster)}.valve.net/570/{rid}_{int(replay_salt)}.dem.bz2"
+    req = urllib.request.Request(replay_url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=120) as resp, output_path.open("wb") as f:
+        f.write(resp.read())
+    if output_path.stat().st_size <= 0:
+        raise RuntimeError("下载完成但文件为空。")
+    return output_path
+
+
 def run_server(host: str, port: int, payload: dict[str, Any], dem_path: Path, open_browser: bool) -> None:
     def current_payload_bytes() -> bytes:
         return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
     html_bytes = HTML_TEMPLATE.encode("utf-8")
+    replay_dir = Path("replay_samples").resolve()
+    nonlocal_dem_path_holder = {"path": dem_path}
+    nonlocal_dem_path_holder = {"path": dem_path}
     # debug+DSR-MAPDBG-01: 服务端静态底图读取与请求日志，定位是否卡在图片传输。
     map_bg_path = Path(__file__).resolve().parent / "assets" / "maps" / "map_full.png"
     map_bg_bytes = map_bg_path.read_bytes() if map_bg_path.exists() else None
@@ -1699,6 +2040,14 @@ def run_server(host: str, port: int, payload: dict[str, Any], dem_path: Path, op
                 self.end_headers()
                 self.wfile.write(payload_bytes)
                 return
+            if self.path == "/replays":
+                body = json.dumps({"replays": list_replay_records(replay_dir)}, ensure_ascii=False).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             if self.path == "/assets/maps/map_full.png":
                 if map_bg_bytes is None:
                     print("[debug+DSR-MAPDBG-01] map-bg-request missing")
@@ -1716,14 +2065,76 @@ def run_server(host: str, port: int, payload: dict[str, Any], dem_path: Path, op
             self.end_headers()
 
         def do_POST(self) -> None:  # noqa: N802
+            if self.path in ("/parse_replay", "/load_replay", "/download_replay_by_id"):
+                length = int(self.headers.get("Content-Length", "0") or "0")
+                raw = self.rfile.read(length) if length > 0 else b"{}"
+                try:
+                    req_data = json.loads(raw.decode("utf-8"))
+                except Exception:
+                    req_data = {}
+
+                def _json_response(code: int, obj: dict[str, Any]) -> None:
+                    body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+                    self.send_response(code)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+
+                if self.path == "/download_replay_by_id":
+                    try:
+                        replay_id = str(req_data.get("replay_id", "")).strip()
+                        file_path = download_replay_by_id(replay_id, replay_dir)
+                        _json_response(200, {"ok": True, "file_path": str(file_path.resolve())})
+                    except Exception as exc:
+                        _json_response(400, {"ok": False, "error": str(exc)})
+                    return
+
+                dem_path_raw = str(req_data.get("dem_path", "")).strip()
+                if not dem_path_raw:
+                    _json_response(400, {"ok": False, "error": "dem_path 不能为空。"})
+                    return
+                dem_candidate = Path(dem_path_raw).expanduser().resolve()
+                if not dem_candidate.exists():
+                    _json_response(404, {"ok": False, "error": f"录像文件不存在: {dem_candidate}"})
+                    return
+                try:
+                    dem_ready = ensure_dem_path(dem_candidate)
+                except Exception as exc:
+                    _json_response(400, {"ok": False, "error": str(exc)})
+                    return
+
+                if self.path == "/parse_replay":
+                    try:
+                        build_gui_payload(dem_ready, playback_fps=int(payload.get("playback_fps", 30)))
+                        _json_response(200, {"ok": True})
+                    except Exception as exc:
+                        _json_response(400, {"ok": False, "error": str(exc)})
+                    return
+
+                if self.path == "/load_replay":
+                    try:
+                        new_payload, new_dem_path = build_gui_payload(
+                            dem_ready,
+                            playback_fps=int(payload.get("playback_fps", 30)),
+                        )
+                        payload.clear()
+                        payload.update(new_payload)
+                        nonlocal_dem_path_holder["path"] = new_dem_path
+                        _json_response(200, {"ok": True, "payload": payload})
+                    except Exception as exc:
+                        _json_response(400, {"ok": False, "error": str(exc)})
+                    return
+
             if self.path == "/clear_cache":
-                deleted = delete_replay_cache(dem_path)
+                target_dem_path = nonlocal_dem_path_holder["path"]
+                deleted = delete_replay_cache(target_dem_path)
                 if deleted:
                     payload["cache_hit"] = False
                 body = json.dumps(
                     {
                         "deleted": bool(deleted),
-                        "cache_path": str(cache_path_for_dem(dem_path)),
+                        "cache_path": str(cache_path_for_dem(target_dem_path)),
                     },
                     ensure_ascii=False,
                 ).encode("utf-8")
