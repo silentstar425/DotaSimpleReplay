@@ -488,7 +488,6 @@ HTML_TEMPLATE = """<!doctype html>
         const st = stateAtTick(timeline, tick);
         // 地图层只绘制激活对象；未激活对象可在下方调试表查看。
         if (!st || st.x === null || st.y === null || !st.active) continue;
-        if (!isVisibleByVision(st.x, st.y, tick)) continue;
         const [cx, cy] = mapToCanvas(st.x, st.y, data.map_bounds, canvas);
         drawEntityGlyph(ctx, cx, cy, timeline);
 
@@ -617,10 +616,10 @@ HTML_TEMPLATE = """<!doctype html>
       enabled: false,
       mode: "both",
       heroVisionRadius: 1600,
-      treeRadius: 70,
-      treeBlockers: [],
       team1: 2,
       team2: 3,
+      /** 战争迷雾：视野外暗层不透明度（0~1） */
+      fogOpacity: 0.62,
     };
 
     let data = null;
@@ -737,56 +736,6 @@ HTML_TEMPLATE = """<!doctype html>
       visionTeamSelect.disabled = !visionSettings.enabled;
     };
 
-    const initTreeBlockers = () => {
-      if (!data) return;
-      const trees = [];
-      const spanX = data.map_bounds.max_x - data.map_bounds.min_x;
-      const spanY = data.map_bounds.max_y - data.map_bounds.min_y;
-      const cols = 28;
-      const rows = 28;
-      for (let r = 2; r < rows - 2; r += 1) {
-        for (let c = 2; c < cols - 2; c += 1) {
-          // 规则化伪随机分布，避免每次刷新树位变化。
-          const seed = (r * 73856093) ^ (c * 19349663);
-          if ((seed % 100) > 22) continue;
-          const jx = ((seed % 7) - 3) / 7;
-          const jy = (((seed >> 3) % 7) - 3) / 7;
-          const nx = (c + 0.5 + jx * 0.3) / cols;
-          const ny = (r + 0.5 + jy * 0.3) / rows;
-          trees.push({
-            x: data.map_bounds.min_x + nx * spanX,
-            y: data.map_bounds.min_y + ny * spanY,
-          });
-        }
-      }
-      visionSettings.treeBlockers = trees;
-    };
-
-    const pointSegmentDistSq = (px, py, x1, y1, x2, y2) => {
-      const vx = x2 - x1;
-      const vy = y2 - y1;
-      const wx = px - x1;
-      const wy = py - y1;
-      const c1 = vx * wx + vy * wy;
-      if (c1 <= 0) return (px - x1) ** 2 + (py - y1) ** 2;
-      const c2 = vx * vx + vy * vy;
-      if (c2 <= c1) return (px - x2) ** 2 + (py - y2) ** 2;
-      const t = c1 / c2;
-      const projX = x1 + t * vx;
-      const projY = y1 + t * vy;
-      return (px - projX) ** 2 + (py - projY) ** 2;
-    };
-
-    const isSightBlockedByTree = (sx, sy, tx, ty) => {
-      const radiusSq = visionSettings.treeRadius * visionSettings.treeRadius;
-      for (const tree of visionSettings.treeBlockers) {
-        if (pointSegmentDistSq(tree.x, tree.y, sx, sy, tx, ty) <= radiusSq) {
-          return true;
-        }
-      }
-      return false;
-    };
-
     const getVisionSourceTimelines = () => {
       if (!data) return [];
       if (visionSettings.mode === "team1") {
@@ -798,21 +747,46 @@ HTML_TEMPLATE = """<!doctype html>
       return data.player_timelines;
     };
 
-    const isVisibleByVision = (x, y, tick) => {
-      if (!visionSettings.enabled) return true;
+    const heroVisionEllipseRadiiPx = (wx, wy) => {
+      const [cx, cy] = mapToCanvas(wx, wy, data.map_bounds, canvas);
+      const [cxRx, cyRx] = mapToCanvas(wx + visionSettings.heroVisionRadius, wy, data.map_bounds, canvas);
+      const [cxRy, cyRy] = mapToCanvas(wx, wy + visionSettings.heroVisionRadius, data.map_bounds, canvas);
+      const rx = Math.hypot(cxRx - cx, cyRx - cy);
+      const ry = Math.hypot(cxRy - cx, cyRy - cy);
+      return { cx, cy, rx, ry };
+    };
+
+    const renderVisionFogOfWar = (tick) => {
+      if (!data || !visionSettings.enabled) return;
+      const mx0 = mapFramePad;
+      const my0 = mapFramePad;
+      const mw = Math.max(0, canvas.width - 2 * mapFramePad);
+      const mh = Math.max(0, canvas.height - 2 * mapFramePad);
+      if (mw <= 0 || mh <= 0) return;
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(mx0, my0, mw, mh);
+      ctx.clip();
+
+      const fogA = Math.max(0, Math.min(1, visionSettings.fogOpacity));
+      ctx.globalCompositeOperation = "source-over";
+      ctx.fillStyle = `rgba(0, 0, 0, ${fogA})`;
+      ctx.fillRect(mx0, my0, mw, mh);
+
+      ctx.globalCompositeOperation = "destination-out";
+      ctx.fillStyle = "rgba(255, 255, 255, 1)";
       const sources = getVisionSourceTimelines();
-      const radiusSq = visionSettings.heroVisionRadius * visionSettings.heroVisionRadius;
       for (const source of sources) {
         const st = stateAtTick(source, tick);
         if (!st || st.x === null || st.y === null || st.hp <= 0) continue;
-        const death = deathInfoAtTick(source, tick);
-        if (death.is_dead) continue;
-        const dx = x - st.x;
-        const dy = y - st.y;
-        if ((dx * dx + dy * dy) > radiusSq) continue;
-        if (!isSightBlockedByTree(st.x, st.y, x, y)) return true;
+        if (deathInfoAtTick(source, tick).is_dead) continue;
+        const { cx, cy, rx, ry } = heroVisionEllipseRadiiPx(st.x, st.y);
+        ctx.beginPath();
+        ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+        ctx.fill();
       }
-      return false;
+      ctx.restore();
     };
 
     const renderMap = (tick) => {
@@ -871,7 +845,6 @@ HTML_TEMPLATE = """<!doctype html>
         if (!st || st.x === null || st.y === null) continue;
         const death = deathInfoAtTick(timeline, tick);
         if (death.is_dead || st.hp <= 0) continue;
-        if (!isVisibleByVision(st.x, st.y, tick)) continue;
 
         const [cx, cy] = mapToCanvas(st.x, st.y, data.map_bounds, canvas);
         ctx.beginPath();
@@ -884,6 +857,7 @@ HTML_TEMPLATE = """<!doctype html>
         ctx.font = "12px Arial";
         ctx.fillText(shortHeroName(timeline.hero_name), cx + 9, cy - 9);
       }
+      renderVisionFogOfWar(tick);
       ctx.restore();
     };
 
@@ -922,7 +896,6 @@ HTML_TEMPLATE = """<!doctype html>
           heroTrailSettings.sampleEveryTicks
         );
         for (const pt of pts) {
-          if (!isVisibleByVision(pt.x, pt.y, tick)) continue;
           const [cx, cy] = mapToCanvas(pt.x, pt.y, data.map_bounds, canvas);
           let alpha = 0.85;
           if (heroTrailSettings.fadeOut) {
@@ -952,7 +925,6 @@ HTML_TEMPLATE = """<!doctype html>
           intervalTicks
         );
         for (const pt of pts) {
-          if (!isVisibleByVision(pt.x, pt.y, tick)) continue;
           const [cx, cy] = mapToCanvas(pt.x, pt.y, data.map_bounds, canvas);
           ctx.save();
           ctx.globalAlpha = Math.max(0.01, Math.min(1, heatmapSettings.opacity));
@@ -1332,7 +1304,6 @@ HTML_TEMPLATE = """<!doctype html>
       slider.value = "0";
       fpsInput.value = String(data.playback_fps || 30);
       updateSpeedUI();
-      initTreeBlockers();
       updateVisionTeamOptions();
       ensureHeroSelectionInitialized();
       rebuildTrailHeroFilterUI();
