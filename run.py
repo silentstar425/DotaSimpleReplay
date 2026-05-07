@@ -552,6 +552,8 @@ HTML_TEMPLATE = """<!doctype html>
     const fpsInput = document.getElementById("fpsInput");
     const canvas = document.getElementById("mapCanvas");
     const ctx = canvas.getContext("2d");
+    /** 仅承载迷雾 alpha，在主画布上用 destination-out 会连地图一起抠成透明洞；离屏只画雾再叠上即可露出地图。 */
+    let fogScratchCanvas = null;
     const trailSettingsModal = document.getElementById("trailSettingsModal");
     const trailSettingsCloseBtn = document.getElementById("trailSettingsCloseBtn");
     const trailDensityInput = document.getElementById("trailDensityInput");
@@ -619,7 +621,7 @@ HTML_TEMPLATE = """<!doctype html>
       team1: 2,
       team2: 3,
       /** 战争迷雾：视野外暗层不透明度（0~1） */
-      fogOpacity: 0.62,
+      fogOpacity: 0.42,
     };
 
     let data = null;
@@ -764,28 +766,50 @@ HTML_TEMPLATE = """<!doctype html>
       const mh = Math.max(0, canvas.height - 2 * mapFramePad);
       if (mw <= 0 || mh <= 0) return;
 
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(mx0, my0, mw, mh);
-      ctx.clip();
+      if (!fogScratchCanvas || fogScratchCanvas.width !== canvas.width || fogScratchCanvas.height !== canvas.height) {
+        fogScratchCanvas = document.createElement("canvas");
+        fogScratchCanvas.width = canvas.width;
+        fogScratchCanvas.height = canvas.height;
+      }
+      const fctx = fogScratchCanvas.getContext("2d");
+      fctx.setTransform(1, 0, 0, 1, 0, 0);
+      fctx.clearRect(0, 0, canvas.width, canvas.height);
+      fctx.globalAlpha = 1;
+      fctx.globalCompositeOperation = "source-over";
+      fctx.save();
+      const centerX = canvas.width / 2;
+      const centerY = canvas.height / 2;
+      fctx.translate(centerX + mapView.panX, centerY + mapView.panY);
+      fctx.scale(mapView.zoom, mapView.zoom);
+      fctx.translate(-centerX, -centerY);
+
+      fctx.beginPath();
+      fctx.rect(mx0, my0, mw, mh);
+      fctx.clip();
 
       const fogA = Math.max(0, Math.min(1, visionSettings.fogOpacity));
-      ctx.globalCompositeOperation = "source-over";
-      ctx.fillStyle = `rgba(0, 0, 0, ${fogA})`;
-      ctx.fillRect(mx0, my0, mw, mh);
+      fctx.fillStyle = `rgba(0, 0, 0, ${fogA})`;
+      fctx.fillRect(mx0, my0, mw, mh);
 
-      ctx.globalCompositeOperation = "destination-out";
-      ctx.fillStyle = "rgba(255, 255, 255, 1)";
+      fctx.globalCompositeOperation = "destination-out";
+      fctx.fillStyle = "#ffffff";
       const sources = getVisionSourceTimelines();
       for (const source of sources) {
         const st = stateAtTick(source, tick);
         if (!st || st.x === null || st.y === null || st.hp <= 0) continue;
         if (deathInfoAtTick(source, tick).is_dead) continue;
         const { cx, cy, rx, ry } = heroVisionEllipseRadiiPx(st.x, st.y);
-        ctx.beginPath();
-        ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
-        ctx.fill();
+        fctx.beginPath();
+        fctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+        fctx.fill();
       }
+      fctx.restore();
+
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.globalCompositeOperation = "source-over";
+      ctx.globalAlpha = 1;
+      ctx.drawImage(fogScratchCanvas, 0, 0);
       ctx.restore();
     };
 
