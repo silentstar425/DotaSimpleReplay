@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 *.dem
 .replay_cache/
+.dsr_last_replay.json
+.dsr_download_prefs.json
+.dsr_user_remarks.json

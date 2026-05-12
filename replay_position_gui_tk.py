@@ -27,6 +27,7 @@ import gem
 from gem.extractors.players import PlayerExtractor
 from gem.parser import ReplayParser
 from replay_cache import cache_path_for_dem, delete_replay_cache, load_replay_cache, save_replay_cache
+from replay_download_io import iter_default_replay_candidates
 from replay_world_entities import WorldEntityCollector
 
 
@@ -87,7 +88,7 @@ def parse_args() -> argparse.Namespace:
         "input_replay",
         nargs="?",
         default=None,
-        help="回放路径（.dem 或 .dem.bz2）。不传则尝试使用 replay_samples 下第一个回放。",
+        help="回放路径（.dem 或 .dem.bz2）。不传则尝试使用 replays/ 或 replay_samples/ 下第一个回放。",
     )
     parser.add_argument("--width", type=int, default=1500, help="窗口宽度（默认 1500）")
     parser.add_argument("--height", type=int, default=980, help="窗口高度（默认 980）")
@@ -102,11 +103,10 @@ def resolve_input_path(raw: str | None) -> Path:
             raise FileNotFoundError(f"输入回放不存在: {path}")
         return path
 
-    sample_dir = Path("replay_samples").resolve()
-    candidates = sorted(sample_dir.glob("*.dem")) + sorted(sample_dir.glob("*.dem.bz2"))
+    candidates = iter_default_replay_candidates()
     if not candidates:
         raise FileNotFoundError(
-            "未提供 input_replay 且 replay_samples 下找不到回放文件。"
+            "未提供 input_replay 且在 replays/ 与 replay_samples/ 下找不到回放文件。"
             "请用: python3 replay_position_gui_tk.py <your.dem|your.dem.bz2>"
         )
     return candidates[0]
@@ -768,6 +768,8 @@ class ReplayPositionTkGUI:
             return "肉"
         if tl.category == "tormentor":
             return "折"
+        if tl.category == "ward":
+            return ""
         return "?"
 
     @staticmethod
@@ -796,6 +798,12 @@ class ReplayPositionTkGUI:
             return "#6d4c41", "#efebe9"
         if tl.category == "tormentor":
             return "#6a1b9a", "#f3e5f5"
+        if tl.category == "ward":
+            if tl.team == 2:
+                return "#66bb6a", "#1b5e20"
+            if tl.team == 3:
+                return "#ef5350", "#b71c1c"
+            return "#78909c", "#37474f"
         return "#455a64", "#eceff1"
 
     def _draw_world_entity(self, tl: WorldEntityTimeline, st: WorldEntityState) -> None:
@@ -804,9 +812,16 @@ class ReplayPositionTkGUI:
         cx, cy = self._map_to_canvas(st.x, st.y)
         fill, outline = self._entity_colors(tl)
         glyph = self._entity_glyph(tl)
-        r = 9 if tl.category in ("roshan", "tormentor") else 7
+        r = 9 if tl.category in ("roshan", "tormentor") else 5 if tl.category == "ward" else 7
 
-        if tl.category == "building" and tl.subtype == "tower":
+        if tl.category == "ward":
+            rr = int(round(r * 1.15))
+            if tl.subtype == "sentry":
+                points = [cx, cy - rr, cx + rr, cy, cx, cy + rr, cx - rr, cy]
+                self.canvas.create_polygon(points, fill=fill, outline=outline, width=1.2)
+            else:
+                self.canvas.create_oval(cx - r, cy - r, cx + r, cy + r, fill=fill, outline=outline, width=1.2)
+        elif tl.category == "building" and tl.subtype == "tower":
             points = [cx, cy - r, cx - r, cy + r, cx + r, cy + r]
             self.canvas.create_polygon(points, fill=fill, outline=outline, width=1.2)
         elif tl.category == "building" and tl.subtype == "barracks":
@@ -817,7 +832,8 @@ class ReplayPositionTkGUI:
         else:
             self.canvas.create_oval(cx - r, cy - r, cx + r, cy + r, fill=fill, outline=outline, width=1.2)
 
-        self.canvas.create_text(cx, cy, text=glyph, fill="#ffffff", font=("Arial", 8, "bold"))
+        if glyph:
+            self.canvas.create_text(cx, cy, text=glyph, fill="#ffffff", font=("Arial", 8, "bold"))
         if tl.category in ("lotus_pool", "roshan", "tormentor"):
             self.canvas.create_text(
                 cx + 10,
@@ -836,7 +852,7 @@ class ReplayPositionTkGUI:
         self.canvas.create_text(
             28,
             12,
-            text="地图（归一化坐标） | 建筑: 基/塔/营/建 | 小兵: 近/远/车 | 野怪: 野 | 莲花池: 莲 | 肉山: 肉 | 折磨者: 折",
+            text="地图（归一化坐标） | 建筑: 基/塔/营/建 | 小兵: 近/远/车 | 野怪: 野 | 莲/肉/折 | 守卫: 天辉绿/夜魇红 假眼圆/真眼菱形",
             fill="#ccc",
             anchor="w",
         )

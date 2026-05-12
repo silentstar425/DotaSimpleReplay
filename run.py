@@ -8,7 +8,7 @@
 3) 右侧英雄状态（血量/蓝量、复活倒计时）
 4) 英雄死亡时不在地图上绘制图标
 5) 播放刷新率（FPS）默认 30，可调
-6) Web 界面「下载管理」弹窗：多任务并发下载、本机 replays/ 与 replay_samples/ 列表、进度/剩余时间、暂停/继续、删除与载入（删除含解析缓存）
+6) Web 界面「下载管理」：下载任务与本机录像合并为一张表、单线程解析队列、备注列与解析进度
 """
 
 from __future__ import annotations
@@ -16,12 +16,15 @@ from __future__ import annotations
 import argparse
 import bz2
 import json
+import os
 import sys
 import threading
+from collections import deque
+import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 import gem
@@ -37,6 +40,50 @@ from replay_download_io import (
 )
 from replay_download_manager import DownloadTaskManager
 from replay_world_entities import WorldEntityCollector
+
+USER_REMARKS_JSON = Path(__file__).resolve().parent / ".dsr_user_remarks.json"
+
+
+def norm_dem_storage_key(path_obj: Path) -> str:
+    """与 Web 端 parse_progress.dem_path 一致的路径键（小写、/、尽量 resolve）。"""
+    try:
+        return str(path_obj.resolve()).replace("\\", "/").lower()
+    except OSError:
+        return str(path_obj).replace("\\", "/").lower()
+
+
+def _load_user_remarks() -> dict[str, dict[str, str]]:
+    out: dict[str, dict[str, str]] = {"by_path": {}, "by_task": {}}
+    try:
+        if USER_REMARKS_JSON.is_file():
+            raw = json.loads(USER_REMARKS_JSON.read_text(encoding="utf-8"))
+            bp, bt = raw.get("by_path") or {}, raw.get("by_task") or {}
+            if isinstance(bp, dict):
+                out["by_path"] = {str(k): str(v) for k, v in bp.items() if isinstance(v, str)}
+            if isinstance(bt, dict):
+                out["by_task"] = {str(k): str(v) for k, v in bt.items() if isinstance(v, str)}
+    except (OSError, json.JSONDecodeError, TypeError):
+        pass
+    return out
+
+
+def _save_user_remarks(data: dict[str, dict[str, str]]) -> None:
+    try:
+        USER_REMARKS_JSON.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+class ParseCancelledError(Exception):
+    """用户取消解析或移出队列时中断 build_gui_payload 内的 parser.parse。"""
+
+
+def _boot_ms(start: float) -> float:
+    """自 start（perf_counter）起的毫秒数，用于启动阶段日志。"""
+    return (time.perf_counter() - start) * 1000.0
 
 
 HTML_TEMPLATE = """<!doctype html>
@@ -71,6 +118,14 @@ HTML_TEMPLATE = """<!doctype html>
       padding: 10px;
       box-sizing: border-box;
       gap: 9px;
+      /* 后出现的 #mapCanvas 会叠在上方；提高控件层 z-index，避免画布抢走按钮的点击命中 */
+      isolation: isolate;
+    }
+    .center > .meta,
+    .center > .controls,
+    .center > .legend {
+      position: relative;
+      z-index: 2;
     }
     .meta { font-size: 12px; color: #c8c8c8; }
     .meta strong { color: #ffffff; }
@@ -131,6 +186,8 @@ HTML_TEMPLATE = """<!doctype html>
       background: #111;
       border: 1px solid #414a56;
       border-radius: 8px;
+      position: relative;
+      z-index: 0;
     }
     .legend { font-size: 11px; color: #9ea7b3; }
     .scroll { overflow: auto; min-height: 0; }
@@ -191,8 +248,12 @@ HTML_TEMPLATE = """<!doctype html>
       align-items: center;
       justify-content: center;
       z-index: 9998;
+      pointer-events: none;
     }
-    .settings-modal.open { display: flex; }
+    .settings-modal.open {
+      display: flex;
+      pointer-events: auto;
+    }
     .settings-modal.sub-modal { z-index: 10000; }
     .settings-body {
       width: min(640px, 92vw);
@@ -246,101 +307,53 @@ HTML_TEMPLATE = """<!doctype html>
       margin-top: 8px;
     }
     .btn-secondary { background: #3a4d63; }
-    .download-task-row {
-      border: 1px solid #2f3946;
-      border-radius: 6px;
-      padding: 8px 10px;
-      margin-bottom: 8px;
-      background: #121820;
-    }
-    .download-task-head {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 8px;
-      margin-bottom: 6px;
-    }
-    .download-task-head input[type="text"] {
-      flex: 1;
-      min-width: 100px;
-      max-width: 220px;
-      background: #0f1318;
-      color: #e8e8e8;
-      border: 1px solid #2f3946;
-      border-radius: 4px;
-      padding: 4px 6px;
-      font-size: 12px;
-    }
-    .dl-progress-wrap {
-      height: 8px;
-      background: #1e2630;
-      border-radius: 4px;
-      overflow: hidden;
-      margin: 4px 0 6px;
-    }
-    .dl-progress-bar {
-      height: 100%;
-      background: linear-gradient(90deg, #2d6cdf, #5a9cff);
-      width: 0%;
-      transition: width 0.2s ease;
-    }
-    .dl-meta {
-      font-size: 11px;
-      color: #9ba7b6;
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-    }
-    .dl-actions {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px;
-      margin-top: 6px;
-    }
-    .dl-actions button { padding: 4px 9px; font-size: 11px; }
-    .local-replay-row {
-      display: flex;
-      flex-direction: row;
-      flex-wrap: wrap;
-      align-items: center;
-      justify-content: space-between;
-      gap: 6px 10px;
-      border: 1px solid #2f3946;
-      border-radius: 5px;
-      padding: 4px 10px;
-      margin-bottom: 5px;
-      background: #121820;
-    }
-    .local-replay-info {
-      flex: 1 1 auto;
-      min-width: 0;
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 6px 14px;
-      font-size: 12px;
-      line-height: 1.25;
-    }
-    .local-replay-name {
-      font-weight: bold;
-      color: #e8e8e8;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      max-width: min(280px, 36vw);
-    }
-    .local-replay-actions {
-      display: flex;
-      flex: 0 0 auto;
-      flex-wrap: nowrap;
-      gap: 6px;
-      align-items: center;
-    }
-    .local-replay-actions button { padding: 3px 10px; font-size: 11px; }
-    .download-manager-body .local-replay-list-scroll {
+    .download-manager-body .replay-manager-scroll {
       min-height: 200px;
       max-height: min(58vh, 680px);
     }
+    .dl-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+      table-layout: fixed;
+    }
+    .dl-table th,
+    .dl-table td {
+      border: 1px solid #2f3946;
+      padding: 5px 8px;
+      text-align: left;
+      vertical-align: middle;
+      word-wrap: break-word;
+    }
+    .dl-table th {
+      background: #1a2330;
+      color: #cfe4ff;
+      font-weight: 600;
+      font-size: 11px;
+    }
+    .dl-table tbody tr:nth-child(even) { background: #111820; }
+    .dl-table tbody tr:hover { background: #182230; }
+    .dl-table .dl-remark-cell {
+      font-size: 11px;
+      color: #b8c4d4;
+      max-width: 160px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .dl-table .dl-actions-cell { white-space: nowrap; }
+    .dl-table .dl-actions-cell button { padding: 3px 8px; font-size: 11px; margin-right: 4px; }
+    .dl-pager {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px 12px;
+      margin-top: 2px;
+      font-size: 12px;
+      color: #9ba7b6;
+    }
+    .dl-pager button { padding: 4px 10px; font-size: 11px; background: #3a4d63; }
+    .dl-pager button:disabled { opacity: 0.45; cursor: not-allowed; }
   </style>
 </head>
 <body>
@@ -381,6 +394,7 @@ HTML_TEMPLATE = """<!doctype html>
           <button id="seekBack10Btn" style="background:#3a4d63;">后退10秒</button>
           <button id="seekForward10Btn" style="background:#3a4d63;">前进10秒</button>
           <button id="speedHalfBtn" style="background:#3a4d63;">0.5x</button>
+          <button id="speedNormalBtn" type="button" style="background:#2d6cdf;" title="恢复为原速（1 倍）">原速</button>
           <button id="speedDoubleBtn" style="background:#3a4d63;">2x</button>
           <span id="speedIndicator" class="speed-indicator">1x</span>
           <div class="slider-wrap">
@@ -441,15 +455,18 @@ HTML_TEMPLATE = """<!doctype html>
           <option value="4">4</option>
           <option value="5">5</option>
         </select>
+        <label class="small-muted" style="margin-left:10px;display:inline-flex;align-items:center;gap:6px;cursor:pointer;">
+          <input type="checkbox" id="autoParseAfterDownloadCheckbox" />
+          下载后自动解析
+        </label>
         <button type="button" id="openNewDownloadModalBtn" style="background:#2d6cdf;">新建下载</button>
         <label for="downloadSearchInput" class="small-muted" style="margin-left:8px;">检索</label>
-        <input id="downloadSearchInput" type="search" placeholder="比赛编号或录像名称" style="flex:1;min-width:140px;" />
+        <input id="downloadSearchInput" type="search" placeholder="比赛编号、文件名或备注" style="flex:1;min-width:140px;" />
       </div>
       <div id="downloadStorageHint" class="small-muted" style="margin-bottom:4px;line-height:1.35;"></div>
-      <div class="small-muted" style="margin-bottom:4px;">本机录像</div>
-      <div id="localReplayList" class="scroll local-replay-list-scroll" style="margin-bottom: 10px;"></div>
-      <div class="small-muted" style="margin-bottom:4px;">下载任务</div>
-      <div id="downloadTaskList" class="scroll" style="max-height: min(28vh, 320px); min-height: 100px;"></div>
+      <div class="small-muted" style="margin-bottom:4px;">录像</div>
+      <div id="replayManagerList" class="scroll replay-manager-scroll" style="margin-bottom: 2px;"></div>
+      <div id="replayManagerPager" class="dl-pager"></div>
     </div>
   </div>
   <div id="newDownloadModal" class="settings-modal sub-modal">
@@ -458,11 +475,9 @@ HTML_TEMPLATE = """<!doctype html>
         <span>新建下载任务</span>
         <button type="button" id="newDownloadModalCloseBtn" class="btn-secondary">关闭</button>
       </div>
-      <div class="settings-grid" style="margin-bottom: 12px;">
+      <div class="settings-grid" style="margin-bottom: 12px; grid-template-columns: minmax(0, 1fr);">
         <label for="modalNewMatchIdInput">比赛编号</label>
         <input id="modalNewMatchIdInput" type="text" inputmode="numeric" placeholder="例如 8781301871" />
-        <label for="modalNewNameInput">录像名称（可选）</label>
-        <input id="modalNewNameInput" type="text" placeholder="默认使用比赛编号作为文件名前缀" />
       </div>
       <div class="settings-actions">
         <button type="button" id="cancelNewDownloadBtn" class="btn-secondary">取消</button>
@@ -714,6 +729,7 @@ HTML_TEMPLATE = """<!doctype html>
     const seekBack10Btn = document.getElementById("seekBack10Btn");
     const seekForward10Btn = document.getElementById("seekForward10Btn");
     const speedHalfBtn = document.getElementById("speedHalfBtn");
+    const speedNormalBtn = document.getElementById("speedNormalBtn");
     const speedDoubleBtn = document.getElementById("speedDoubleBtn");
     const speedIndicator = document.getElementById("speedIndicator");
     const slider = document.getElementById("slider");
@@ -721,17 +737,17 @@ HTML_TEMPLATE = """<!doctype html>
     const downloadManagerModal = document.getElementById("downloadManagerModal");
     const downloadManagerCloseBtn = document.getElementById("downloadManagerCloseBtn");
     const maxConcurrentSelect = document.getElementById("maxConcurrentSelect");
+    const autoParseAfterDownloadCheckbox = document.getElementById("autoParseAfterDownloadCheckbox");
     const openNewDownloadModalBtn = document.getElementById("openNewDownloadModalBtn");
     const newDownloadModal = document.getElementById("newDownloadModal");
     const newDownloadModalCloseBtn = document.getElementById("newDownloadModalCloseBtn");
     const modalNewMatchIdInput = document.getElementById("modalNewMatchIdInput");
-    const modalNewNameInput = document.getElementById("modalNewNameInput");
     const confirmNewDownloadBtn = document.getElementById("confirmNewDownloadBtn");
     const cancelNewDownloadBtn = document.getElementById("cancelNewDownloadBtn");
     const downloadSearchInput = document.getElementById("downloadSearchInput");
     const downloadStorageHint = document.getElementById("downloadStorageHint");
-    const localReplayList = document.getElementById("localReplayList");
-    const downloadTaskList = document.getElementById("downloadTaskList");
+    const replayManagerList = document.getElementById("replayManagerList");
+    const replayManagerPager = document.getElementById("replayManagerPager");
     const clearCacheBtn = document.getElementById("clearCacheBtn");
     const toggleTrailBtn = document.getElementById("toggleTrailBtn");
     const openTrailSettingsBtn = document.getElementById("openTrailSettingsBtn");
@@ -1324,6 +1340,7 @@ HTML_TEMPLATE = """<!doctype html>
     };
 
     const render = (tick) => {
+      if (!data || data.session_ready === false) return;
       tick = Math.max(0, Math.min(data.game_end_tick, Math.round(tick)));
       currentTick = tick;
       slider.value = String(tick);
@@ -1336,6 +1353,7 @@ HTML_TEMPLATE = """<!doctype html>
     };
 
     const renderFromFloat = (tickFloat) => {
+      if (!data || data.session_ready === false) return;
       const clamped = Math.max(0, Math.min(data.game_end_tick, tickFloat));
       currentTickFloat = clamped;
       render(clamped);
@@ -1352,6 +1370,14 @@ HTML_TEMPLATE = """<!doctype html>
 
     const applyLoadedPayload = () => {
       if (!data) return;
+      if (data.session_ready === false) {
+        titleLine.textContent = "Dota2 回放可视化 · 请在下载管理中选择录像或处理缓存";
+        slider.min = "0";
+        slider.max = "0";
+        slider.value = "0";
+        stopPlayback();
+        return;
+      }
       titleLine.textContent = `Dota2 回放可视化 · match ${data.match_id}`;
       slider.min = "0";
       slider.max = String(data.game_end_tick);
@@ -1378,15 +1404,22 @@ HTML_TEMPLATE = """<!doctype html>
 
     const reloadDataFromServer = async () => {
       stopPlayback();
-      const res = await fetch("/data");
+      const res = await fetch("/data", { cache: "no-store" });
       if (!res.ok) throw new Error(`拉取数据失败 HTTP ${res.status}`);
       data = await res.json();
+      if (data.parse_progress) {
+        lastDownloadPayload.parse_progress = data.parse_progress;
+        if (!Array.isArray(lastDownloadPayload.parse_progress.queued_paths)) {
+          lastDownloadPayload.parse_progress.queued_paths = [];
+        }
+      }
       applyLoadedPayload();
     };
 
     const updateSpeedUI = () => {
       speedIndicator.textContent = `${playbackSpeed}x`;
       speedHalfBtn.style.background = playbackSpeed === 0.5 ? "#2d6cdf" : "#3a4d63";
+      if (speedNormalBtn) speedNormalBtn.style.background = playbackSpeed === 1.0 ? "#2d6cdf" : "#3a4d63";
       speedDoubleBtn.style.background = playbackSpeed === 2.0 ? "#2d6cdf" : "#3a4d63";
     };
 
@@ -1400,7 +1433,7 @@ HTML_TEMPLATE = """<!doctype html>
     };
 
     const seekBySeconds = (deltaSec) => {
-      if (!data) return;
+      if (!data || data.session_ready === false) return;
       const deltaTick = deltaSec * data.tick_rate;
       renderFromFloat(currentTickFloat + deltaTick);
       if (playing) {
@@ -1410,6 +1443,7 @@ HTML_TEMPLATE = """<!doctype html>
     };
 
     const startPlayback = () => {
+      if (!data || data.session_ready === false) return;
       const fps = Math.max(1, Number(fpsInput.value) || data.playback_fps || 30);
       fpsInput.value = String(Math.round(fps));
       playing = true;
@@ -1430,13 +1464,14 @@ HTML_TEMPLATE = """<!doctype html>
     };
 
     playBtn.addEventListener("click", () => {
-      if (!data) return;
+      if (!data || data.session_ready === false) return;
       if (playing) stopPlayback();
       else startPlayback();
     });
     seekBack10Btn.addEventListener("click", () => seekBySeconds(-10));
     seekForward10Btn.addEventListener("click", () => seekBySeconds(10));
     speedHalfBtn.addEventListener("click", () => setPlaybackSpeed(0.5));
+    if (speedNormalBtn) speedNormalBtn.addEventListener("click", () => setPlaybackSpeed(1.0));
     speedDoubleBtn.addEventListener("click", () => setPlaybackSpeed(2.0));
     toggleVisionBtn.addEventListener("click", () => {
       visionSettings.enabled = !visionSettings.enabled;
@@ -1449,7 +1484,7 @@ HTML_TEMPLATE = """<!doctype html>
     });
 
     slider.addEventListener("input", (e) => {
-      if (!data) return;
+      if (!data || data.session_ready === false) return;
       renderFromFloat(Number(e.target.value));
       if (playing) {
         playbackAnchorRealMs = performance.now();
@@ -1458,12 +1493,12 @@ HTML_TEMPLATE = """<!doctype html>
     });
 
     boardMetric.addEventListener("change", () => {
-      if (!data) return;
+      if (!data || data.session_ready === false) return;
       renderBoard(currentTick);
     });
 
     fpsInput.addEventListener("change", () => {
-      if (!data) return;
+      if (!data || data.session_ready === false) return;
       const fps = Math.max(1, Math.min(240, Number(fpsInput.value) || data.playback_fps || 30));
       fpsInput.value = String(Math.round(fps));
       if (playing) {
@@ -1504,7 +1539,7 @@ HTML_TEMPLATE = """<!doctype html>
       if (data) render(currentTick);
     });
     trailSelectAllBtn.addEventListener("click", () => {
-      if (!data) return;
+      if (!data || data.session_ready === false) return;
       heroTrailSettings.selectedHeroes = new Set(data.player_timelines.map((x) => x.hero_name));
       rebuildTrailHeroFilterUI();
       render(currentTick);
@@ -1585,7 +1620,16 @@ HTML_TEMPLATE = """<!doctype html>
     canvas.style.cursor = "grab";
 
     let downloadPollTimer = null;
-    let lastDownloadPayload = { tasks: [], max_concurrent: 3, local_replays: [], storage_roots: {} };
+    let lastDownloadPayload = {
+      tasks: [],
+      max_concurrent: 3,
+      auto_parse_after_download: false,
+      local_replays: [],
+      storage_roots: {},
+      parse_progress: { active: false, dem_path: null, pct: 0, queued_paths: [] },
+    };
+    let replayManagerPage = 1;
+    const DL_PAGE_SIZE = 10;
 
     const dlAttrEsc = (s) =>
       String(s ?? "")
@@ -1615,168 +1659,361 @@ HTML_TEMPLATE = """<!doctype html>
       return `${(v / (1024 * 1024 * 1024)).toFixed(2)} GB`;
     };
 
-    const dlStateLabel = (st) => {
-      const map = {
-        queued: "排队",
-        waiting_slot: "等待槽位",
-        running: "进行中",
-        paused: "已暂停",
-        completed: "完成",
-        error: "失败",
-        cancelled: "已取消",
-      };
-      return map[st] || st;
-    };
+    function truncateToMinute(timeStr) {
+      if (!timeStr || typeof timeStr !== "string") return "—";
+      const s = timeStr.trim();
+      const m = s.match(/^(\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2})/);
+      if (m) return m[1];
+      return s.length >= 10 ? s.slice(0, 10) : s;
+    }
 
     async function fetchDownloadTasksRaw() {
       const res = await fetch("/api/downloads");
       if (!res.ok) return null;
-      return res.json();
+      const j = await res.json();
+      if (!j.parse_progress) j.parse_progress = { active: false, dem_path: null, pct: 0, queued_paths: [] };
+      if (!Array.isArray(j.parse_progress.queued_paths)) j.parse_progress.queued_paths = [];
+      if (j.auto_parse_after_download === undefined) j.auto_parse_after_download = false;
+      return j;
     }
 
-    function renderLocalReplaySection() {
+    async function afterLoadStartPlayingFromManager() {
+      await reloadDataFromServer();
+      closeNewDownloadModal();
+      downloadManagerModal.classList.remove("open");
+      if (downloadPollTimer) {
+        clearInterval(downloadPollTimer);
+        downloadPollTimer = null;
+      }
+      startPlayback();
+    }
+
+    function normDemPathKey(p) {
+      if (!p) return "";
+      return String(p).replaceAll("\\\\", "/").toLowerCase();
+    }
+
+    function demKeyForParseProgress(pathStr) {
+      return normDemPathKey(pathStr).replace(/\\.bz2$/i, "");
+    }
+
+    function parseQueuedPaths() {
+      const pp = lastDownloadPayload.parse_progress || {};
+      return Array.isArray(pp.queued_paths) ? pp.queued_paths : [];
+    }
+
+    function isParseActiveForKey(key) {
+      if (!key) return false;
+      const pp = lastDownloadPayload.parse_progress || {};
+      return Boolean(pp.active && pp.dem_path === key);
+    }
+
+    function isParseQueuedForKey(key) {
+      if (!key) return false;
+      return parseQueuedPaths().includes(key);
+    }
+
+    function localStatusText(row) {
+      const pp = lastDownloadPayload.parse_progress || {};
+      const key = row.dem_norm_key || demKeyForParseProgress(String(row.path || ""));
+      if (isParseActiveForKey(key)) return `处理中（${Math.round(Number(pp.pct) || 0)}%）`;
+      if (isParseQueuedForKey(key)) return "队列中";
+      if (row.playback_ready) return "可播放";
+      return "待处理";
+    }
+
+    function isTaskDownloading(t) {
+      if (t.state === "running") return true;
+      if (t.state === "paused" && t.phase && t.phase !== "queued") return true;
+      return false;
+    }
+
+    function taskStatusText(t) {
+      const pp = lastDownloadPayload.parse_progress || {};
+      const pct = Math.min(100, Math.round((t.progress || 0) * 100));
+      if (t.state === "completed") {
+        const pk = t.dem_norm_key || (t.output_dem_path ? demKeyForParseProgress(String(t.output_dem_path)) : "");
+        if (!t.playback_ready && pk) {
+          if (isParseActiveForKey(pk)) return `处理中（${Math.round(Number(pp.pct) || 0)}%）`;
+          if (isParseQueuedForKey(pk)) return "队列中";
+        }
+        return t.playback_ready ? "可播放" : "待处理";
+      }
+      if (t.state === "error") return "失败";
+      if (t.state === "cancelled") return "已取消";
+      if (isTaskDownloading(t)) {
+        return t.state === "paused" ? `下载中（已暂停 ${pct}%）` : `下载中（${pct}%）`;
+      }
+      return "待处理";
+    }
+
+    function taskRemarkMeta(t) {
+      const parts = [];
+      if (t.created_at) parts.push(`创建 ${t.created_at}`);
+      if (t.download_started_at) parts.push(`开始 ${t.download_started_at}`);
+      if (isTaskDownloading(t) || t.state === "waiting_slot") {
+        const eta = formatDlEta(t.eta_seconds);
+        if (eta !== "—") parts.push(`剩余 ${eta}`);
+      }
+      if (t.state === "error" && t.error_message) parts.push(String(t.error_message).slice(0, 160));
+      return parts.length ? parts.join(" · ") : "";
+    }
+
+    function isTaskTerminal(t) {
+      return ["completed", "error", "cancelled"].includes(t.state);
+    }
+
+    function taskActiveOrder(t) {
+      if (t.state === "running") return 0;
+      if (t.state === "waiting_slot") return 1;
+      if (t.state === "queued") return 2;
+      if (t.state === "paused") return 3;
+      return 9;
+    }
+
+    function filterLocalsByQuery(locals, q) {
+      if (!q) return locals;
+      return locals.filter(
+        (row) =>
+          String(row.match_id_hint || "").includes(q) ||
+          String(row.name || "").toLowerCase().includes(q) ||
+          String(row.path || "").toLowerCase().includes(q) ||
+          String(row.user_remark || "").toLowerCase().includes(q)
+      );
+    }
+
+    function buildMergedReplayRows(allTasks, allLocals) {
+      const completedPaths = new Set();
+      for (const t of allTasks) {
+        if (t.state === "completed" && t.output_dem_path) {
+          const k = t.dem_norm_key || demKeyForParseProgress(String(t.output_dem_path));
+          if (k) completedPaths.add(k);
+        }
+      }
+      const localsOnly = [];
+      for (const row of allLocals) {
+        const p = row.dem_norm_key || demKeyForParseProgress(String(row.path || ""));
+        if (completedPaths.has(p)) continue;
+        localsOnly.push(row);
+      }
+      const items = [];
+      for (const t of allTasks) items.push({ kind: "task", task: t });
+      for (const row of localsOnly) items.push({ kind: "local", local: row });
+      items.sort((a, b) => {
+        const ac = a.kind === "task" && !isTaskTerminal(a.task) ? 0 : 1;
+        const bc = b.kind === "task" && !isTaskTerminal(b.task) ? 0 : 1;
+        if (ac !== bc) return ac - bc;
+        if (ac === 0 && a.kind === "task" && b.kind === "task") {
+          const oa = taskActiveOrder(a.task);
+          const ob = taskActiveOrder(b.task);
+          if (oa !== ob) return oa - ob;
+          return String(b.task.created_at || "").localeCompare(String(a.task.created_at || ""));
+        }
+        const ta =
+          a.kind === "task"
+            ? String(a.task.download_started_at || a.task.created_at || "")
+            : String(a.local.modified || "");
+        const tb =
+          b.kind === "task"
+            ? String(b.task.download_started_at || b.task.created_at || "")
+            : String(b.local.modified || "");
+        if (ta !== tb) return tb.localeCompare(ta);
+        if (a.kind === "task" && b.kind === "task") return String(b.task.match_id).localeCompare(String(a.task.match_id));
+        if (a.kind === "local" && b.kind === "local") return String(b.local.name || "").localeCompare(String(a.local.name || ""));
+        return a.kind === "task" ? -1 : 1;
+      });
+      return items;
+    }
+
+    function renderPagerBar(page, total, pageSize) {
+      if (!replayManagerPager) return;
+      if (total === 0) {
+        replayManagerPager.innerHTML = "";
+        return;
+      }
+      const totalPages = Math.max(1, Math.ceil(total / pageSize));
+      if (total <= pageSize) {
+        replayManagerPager.innerHTML = `<span class="small-muted">共 ${total} 条</span>`;
+        return;
+      }
+      const from = (page - 1) * pageSize + 1;
+      const to = Math.min(total, page * pageSize);
+      const d1 = page <= 1 ? 'disabled' : '';
+      const d2 = page >= totalPages ? 'disabled' : '';
+      replayManagerPager.innerHTML = `<span class="small-muted">共 ${total} 条，${from}–${to}</span><button type="button" class="dl-pager-btn" data-pager-dir="-1" ${d1}>上一页</button><span class="small-muted">第 ${page} / ${totalPages} 页</span><button type="button" class="dl-pager-btn" data-pager-dir="1" ${d2}>下一页</button>`;
+      replayManagerPager.querySelectorAll(".dl-pager-btn").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const d = parseInt(btn.getAttribute("data-pager-dir") || "0", 10);
+          const tp = Math.max(1, Math.ceil(total / pageSize));
+          replayManagerPage = Math.max(1, Math.min(tp, replayManagerPage + d));
+          renderDownloadTaskList();
+        });
+      });
+    }
+
+    function renderDownloadTaskList() {
       const roots = lastDownloadPayload.storage_roots || {};
       if (downloadStorageHint) {
         const rp = roots.replays || "";
         const leg = roots.replay_samples || "";
         downloadStorageHint.textContent = rp ? `录像目录 replays：${rp} · 兼容 replay_samples：${leg}` : "";
       }
-      if (!localReplayList) return;
-      const locals = lastDownloadPayload.local_replays || [];
-      if (locals.length === 0) {
-        localReplayList.innerHTML =
-          '<div class="small-muted">暂无本机录像。新下载写入 replays/；旧文件仍可从 replay_samples/ 读取。</div>';
+      if (!replayManagerList) return;
+
+      const allTasks = lastDownloadPayload.tasks || [];
+      const allLocals = lastDownloadPayload.local_replays || [];
+      const q = (downloadSearchInput.value || "").trim().toLowerCase();
+      const tasksF = q
+        ? allTasks.filter(
+            (t) =>
+              String(t.match_id).includes(q) ||
+              String(t.display_stem || "").toLowerCase().includes(q) ||
+              String(t.user_remark || "").toLowerCase().includes(q)
+          )
+        : allTasks;
+      const localsF = filterLocalsByQuery(allLocals, q);
+      const merged = buildMergedReplayRows(tasksF, localsF);
+
+      syncDownloadSettingsControls();
+
+      if (allTasks.length === 0 && allLocals.length === 0) {
+        replayManagerList.innerHTML =
+          '<div class="small-muted">暂无录像。点击「新建下载」添加下载任务；本机 replays/ 与 replay_samples/ 中的文件也会显示在此。</div>';
+        if (replayManagerPager) replayManagerPager.innerHTML = "";
+        replayManagerPage = 1;
         return;
       }
-      localReplayList.innerHTML = locals
-        .map((row, idx) => {
+      if (merged.length === 0) {
+        replayManagerList.innerHTML = '<div class="small-muted">无匹配录像，请调整检索关键字。</div>';
+        if (replayManagerPager) replayManagerPager.innerHTML = "";
+        return;
+      }
+
+      const totalPages = Math.max(1, Math.ceil(merged.length / DL_PAGE_SIZE));
+      if (replayManagerPage > totalPages) replayManagerPage = totalPages;
+      const t0 = (replayManagerPage - 1) * DL_PAGE_SIZE;
+      const slice = merged.slice(t0, t0 + DL_PAGE_SIZE);
+
+      const bodyRows = slice
+        .map((item, i) => {
+          const gIdx = t0 + i;
+          if (item.kind === "task") {
+            const t = item.task;
+            const metaTip = taskRemarkMeta(t);
+            const titleAttr = metaTip ? ` title="${dlAttrEsc(metaTip)}"` : "";
+            const mid = `#${t.match_id}`;
+            const folder = "replays";
+            const sz =
+              t.output_size != null && Number.isFinite(Number(t.output_size))
+                ? formatDlBytes(t.output_size)
+                : "—";
+            const timeCol = truncateToMinute(t.download_started_at || t.created_at || "");
+            const st = taskStatusText(t);
+            const fileName = dlAttrEsc(String(t.display_stem || t.match_id || ""));
+            const uraw = String(t.user_remark || "");
+            const ur = dlAttrEsc(uraw);
+            const pk = t.dem_norm_key || (t.output_dem_path ? demKeyForParseProgress(String(t.output_dem_path)) : "");
+            const inParse = Boolean(pk && (isParseActiveForKey(pk) || isParseQueuedForKey(pk)));
+            let actions = `<button type="button" class="btn-dl-delete" data-task-id="${t.id}" style="background:#8b1e2d;">删除</button>`;
+            if (t.state === "completed") {
+              if (t.playback_ready) {
+                actions = `<button type="button" class="btn-dl-play" data-task-id="${t.id}" style="background:#1a7f37;">播放</button>${actions}`;
+              } else if (inParse) {
+                actions = `<button type="button" class="btn-parse-cancel" data-dem-key="${dlAttrEsc(pk)}" data-task-id="${t.id}" style="background:#8a5a2b;">取消</button>${actions}`;
+              } else {
+                actions = `<button type="button" class="btn-dl-process" data-task-id="${t.id}" style="background:#6b4dbf;">处理</button>${actions}`;
+              }
+            } else {
+              const canPause = ["running", "waiting_slot", "queued"].includes(t.state);
+              const canResume = t.state === "paused";
+              actions = `<button type="button" class="btn-dl-pause" data-task-id="${t.id}" ${canPause ? '' : 'disabled'}>暂停</button><button type="button" class="btn-dl-resume" data-task-id="${t.id}" ${canResume ? '' : 'disabled'}>继续</button>${actions}`;
+            }
+            return `<tr data-merged-idx="${gIdx}"${titleAttr}>
+              <td>${fileName}</td>
+              <td class="small-muted">${folder}</td>
+              <td>${mid}</td>
+              <td>${sz}</td>
+              <td class="small-muted">${dlAttrEsc(timeCol)}</td>
+              <td>${dlAttrEsc(st)}</td>
+              <td class="dl-remark-cell"><span title="${ur}">${uraw ? ur : "—"}</span> <button type="button" class="btn-secondary btn-remark-task" data-task-id="${t.id}" style="padding:3px 8px;font-size:11px;">编辑</button></td>
+              <td class="dl-actions-cell">${actions}</td>
+            </tr>`;
+          }
+          const row = item.local;
           const mid = row.match_id_hint != null && row.match_id_hint !== undefined ? `#${row.match_id_hint}` : "—";
           const folder = dlAttrEsc(String(row.folder || ""));
           const name = dlAttrEsc(String(row.name || ""));
-          const mod = dlAttrEsc(String(row.modified || "—"));
           const sz = formatDlBytes(row.size);
-          return `<div class="local-replay-row">
-            <div class="local-replay-info">
-              <span class="local-replay-name" title="${name}">${name}</span>
-              <span class="small-muted">${folder}</span>
-              <span class="small-muted">比赛 ${mid}</span>
-              <span class="small-muted">${sz}</span>
-              <span class="small-muted">${mod}</span>
-            </div>
-            <div class="local-replay-actions">
-              <button type="button" class="btn-local-load" data-local-idx="${idx}">载入</button>
-              <button type="button" class="btn-local-delete" data-local-idx="${idx}" style="background:#8b1e2d;">删除</button>
-            </div>
-          </div>`;
-        })
-        .join("");
-      localReplayList.querySelectorAll(".btn-local-load").forEach((btn) => {
-        btn.addEventListener("click", async () => {
-          const idx = parseInt(btn.getAttribute("data-local-idx") || "-1", 10);
-          const item = lastDownloadPayload.local_replays[idx];
-          if (!item || !item.path) return;
-          try {
-            const res = await fetch("/api/downloads/local/load", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ path: item.path }),
-            });
-            const o = await res.json().catch(() => ({}));
-            if (!res.ok || o.ok === false) throw new Error(o.error || res.statusText);
-            await reloadDataFromServer();
-            alert(`已载入比赛 ${data.match_id}`);
-            const j = await fetchDownloadTasksRaw();
-            if (j) lastDownloadPayload = j;
-            renderDownloadTaskList();
-          } catch (e) {
-            alert(`载入失败：${e.message || e}`);
+          const timeCol = truncateToMinute(String(row.modified || ""));
+          const st = localStatusText(row);
+          const pathEnc = encodeURIComponent(String(row.path || ""));
+          const uraw = String(row.user_remark || "");
+          const ur = dlAttrEsc(uraw);
+          const pk = row.dem_norm_key || demKeyForParseProgress(String(row.path || ""));
+          const inParse = Boolean(pk && (isParseActiveForKey(pk) || isParseQueuedForKey(pk)));
+          let act = `<button type="button" class="btn-local-delete" data-local-path="${pathEnc}" style="background:#8b1e2d;">删除</button>`;
+          if (row.playback_ready) {
+            act = `<button type="button" class="btn-local-play" data-local-path="${pathEnc}" style="background:#1a7f37;">播放</button>${act}`;
+          } else if (inParse) {
+            act = `<button type="button" class="btn-parse-cancel" data-dem-key="${dlAttrEsc(pk)}" style="background:#8a5a2b;">取消</button>${act}`;
+          } else {
+            act = `<button type="button" class="btn-local-process" data-local-path="${pathEnc}" style="background:#6b4dbf;">处理</button>${act}`;
           }
-        });
-      });
-      localReplayList.querySelectorAll(".btn-local-delete").forEach((btn) => {
-        btn.addEventListener("click", async () => {
-          if (!confirm("确定删除该录像文件及其解析缓存？")) return;
-          const idx = parseInt(btn.getAttribute("data-local-idx") || "-1", 10);
-          const item = lastDownloadPayload.local_replays[idx];
-          if (!item || !item.path) return;
-          try {
-            const res = await fetch("/api/downloads/local/delete", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ path: item.path }),
-            });
-            const o = await res.json().catch(() => ({}));
-            if (!res.ok || o.ok === false) throw new Error(o.error || res.statusText);
-            const j = await fetchDownloadTasksRaw();
-            if (j) lastDownloadPayload = j;
-            renderDownloadTaskList();
-          } catch (e) {
-            alert(`删除失败：${e.message || e}`);
-          }
-        });
-      });
-    }
-
-    function renderDownloadTaskList() {
-      renderLocalReplaySection();
-      const all = lastDownloadPayload.tasks || [];
-      const q = (downloadSearchInput.value || "").trim().toLowerCase();
-      const tasks = q
-        ? all.filter(
-            (t) => String(t.match_id).includes(q) || String(t.display_stem || "").toLowerCase().includes(q)
-          )
-        : all;
-      const mcVal = String(Math.max(1, Math.min(5, Number(lastDownloadPayload.max_concurrent) || 3)));
-      if (maxConcurrentSelect.value !== mcVal) maxConcurrentSelect.value = mcVal;
-      if (all.length === 0) {
-        downloadTaskList.innerHTML = '<div class="small-muted">暂无任务，点击「新建下载」添加任务。</div>';
-        return;
-      }
-      if (tasks.length === 0) {
-        downloadTaskList.innerHTML = '<div class="small-muted">无匹配任务，请调整检索关键字。</div>';
-        return;
-      }
-      downloadTaskList.innerHTML = tasks
-        .map((t) => {
-          const pct = Math.min(100, Math.round((t.progress || 0) * 100));
-          const canPause = ["running", "waiting_slot", "queued"].includes(t.state);
-          const canResume = t.state === "paused";
-          const canLoad = Boolean(t.state === "completed" && t.output_dem_path);
-          const errHtml = t.error_message
-            ? `<div style="margin-top:4px;color:#ff8a80;font-size:11px;">${dlAttrEsc(String(t.error_message).slice(0, 400))}</div>`
-            : "";
-          return `<div class="download-task-row" data-task-id="${t.id}">
-            <div class="download-task-head">
-              <strong>#${t.match_id}</strong>
-              <span class="small-muted">${dlStateLabel(t.state)}</span>
-              <input type="text" class="dl-name-input" data-task-id="${t.id}" value="${dlAttrEsc(t.display_stem)}" title="录像名称" />
-            </div>
-            <div class="dl-progress-wrap"><div class="dl-progress-bar" style="width:${pct}%"></div></div>
-            <div class="dl-meta">
-              <span>进度 ${pct}%</span>
-              <span>剩余时间 ${formatDlEta(t.eta_seconds)}</span>
-              <span>开始下载 ${t.download_started_at || "—"}</span>
-              <span>任务创建 ${t.created_at || "—"}</span>
-            </div>
-            ${errHtml}
-            <div class="dl-actions">
-              <button type="button" class="btn-dl-pause" data-task-id="${t.id}" ${canPause ? "" : "disabled"}>暂停</button>
-              <button type="button" class="btn-dl-resume" data-task-id="${t.id}" ${canResume ? "" : "disabled"}>继续</button>
-              <button type="button" class="btn-dl-load" data-task-id="${t.id}" ${canLoad ? "" : "disabled"}>载入</button>
-              <button type="button" class="btn-dl-delete" data-task-id="${t.id}" style="background:#8b1e2d;">删除</button>
-            </div>
-          </div>`;
+          return `<tr data-merged-idx="${gIdx}">
+            <td title="${name}"><span class="local-replay-name">${name}</span></td>
+            <td class="small-muted">${folder}</td>
+            <td>${mid}</td>
+            <td>${sz}</td>
+            <td class="small-muted">${dlAttrEsc(timeCol)}</td>
+            <td>${st}</td>
+            <td class="dl-remark-cell"><span title="${ur}">${uraw ? ur : "—"}</span> <button type="button" class="btn-secondary btn-remark-local" data-local-path="${pathEnc}" style="padding:3px 8px;font-size:11px;">编辑</button></td>
+            <td class="dl-actions-cell">${act}</td>
+          </tr>`;
         })
         .join("");
 
-      downloadTaskList.querySelectorAll(".dl-name-input").forEach((inp) => {
-        inp.addEventListener("change", async () => {
-          const id = inp.getAttribute("data-task-id");
+      replayManagerList.innerHTML = `<table class="dl-table"><thead><tr><th>文件名</th><th>目录</th><th>比赛</th><th>大小</th><th>时间</th><th>状态</th><th>备注</th><th>操作</th></tr></thead><tbody>${bodyRows}</tbody></table>`;
+      renderPagerBar(replayManagerPage, merged.length, DL_PAGE_SIZE);
+
+      const postCancelParse = async (btn) => {
+        const key = btn.getAttribute("data-dem-key");
+        const tid = btn.getAttribute("data-task-id");
+        try {
+          const body = {};
+          if (key) body.dem_norm_key = key;
+          if (tid) body.task_id = tid;
+          if (!body.dem_norm_key && !body.task_id) return;
+          const res = await fetch("/api/downloads/parse/cancel", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          const o = await res.json().catch(() => ({}));
+          if (!res.ok || o.ok === false) throw new Error(o.error || res.statusText);
+          const j = await fetchDownloadTasksRaw();
+          if (j) lastDownloadPayload = j;
+          renderDownloadTaskList();
+        } catch (e) {
+          alert(`取消失败：${e.message || e}`);
+        }
+      };
+      replayManagerList.querySelectorAll(".btn-parse-cancel").forEach((b) => {
+        b.addEventListener("click", () => postCancelParse(b));
+      });
+
+      replayManagerList.querySelectorAll(".btn-remark-task").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const id = btn.getAttribute("data-task-id");
+          if (!id) return;
+          const cur = (lastDownloadPayload.tasks || []).find((x) => x.id === id);
+          const v0 = cur && cur.user_remark ? String(cur.user_remark) : "";
+          const v = prompt("备注（可留空）", v0);
+          if (v === null) return;
           try {
             const res = await fetch(`/api/downloads/${id}`, {
               method: "PATCH",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ display_stem: inp.value }),
+              body: JSON.stringify({ user_remark: v }),
             });
             const o = await res.json();
             if (!res.ok || !o.ok) throw new Error(o.error || res.statusText);
@@ -1784,10 +2021,41 @@ HTML_TEMPLATE = """<!doctype html>
             if (j) lastDownloadPayload = j;
             renderDownloadTaskList();
           } catch (e) {
-            alert(`更新名称失败：${e.message || e}`);
+            alert(`保存备注失败：${e.message || e}`);
           }
         });
       });
+      replayManagerList.querySelectorAll(".btn-remark-local").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const enc = btn.getAttribute("data-local-path");
+          if (!enc) return;
+          let pathStr = "";
+          try {
+            pathStr = decodeURIComponent(enc);
+          } catch (e) {
+            return;
+          }
+          const cur = (lastDownloadPayload.local_replays || []).find((x) => String(x.path) === pathStr);
+          const v0 = cur && cur.user_remark ? String(cur.user_remark) : "";
+          const v = prompt("备注（可留空）", v0);
+          if (v === null) return;
+          try {
+            const res = await fetch("/api/downloads/local/remark", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ path: pathStr, user_remark: v }),
+            });
+            const o = await res.json();
+            if (!res.ok || !o.ok) throw new Error(o.error || res.statusText);
+            const j = await fetchDownloadTasksRaw();
+            if (j) lastDownloadPayload = j;
+            renderDownloadTaskList();
+          } catch (e) {
+            alert(`保存备注失败：${e.message || e}`);
+          }
+        });
+      });
+
       const postAct = async (btn, path) => {
         const id = btn.getAttribute("data-task-id");
         if (!id) return;
@@ -1795,10 +2063,6 @@ HTML_TEMPLATE = """<!doctype html>
           const res = await fetch(`/api/downloads/${id}/${path}`, { method: "POST" });
           const o = await res.json().catch(() => ({}));
           if (!res.ok || o.ok === false) throw new Error(o.error || res.statusText);
-          if (path === "load") {
-            await reloadDataFromServer();
-            alert(`已载入比赛 ${data.match_id}`);
-          }
           const j = await fetchDownloadTasksRaw();
           if (j) lastDownloadPayload = j;
           renderDownloadTaskList();
@@ -1806,10 +2070,42 @@ HTML_TEMPLATE = """<!doctype html>
           alert(`${path} 失败：${e.message || e}`);
         }
       };
-      downloadTaskList.querySelectorAll(".btn-dl-pause").forEach((b) => b.addEventListener("click", () => postAct(b, "pause")));
-      downloadTaskList.querySelectorAll(".btn-dl-resume").forEach((b) => b.addEventListener("click", () => postAct(b, "resume")));
-      downloadTaskList.querySelectorAll(".btn-dl-load").forEach((b) => b.addEventListener("click", () => postAct(b, "load")));
-      downloadTaskList.querySelectorAll(".btn-dl-delete").forEach((b) =>
+      replayManagerList.querySelectorAll(".btn-dl-pause").forEach((b) => b.addEventListener("click", () => postAct(b, "pause")));
+      replayManagerList.querySelectorAll(".btn-dl-resume").forEach((b) => b.addEventListener("click", () => postAct(b, "resume")));
+      replayManagerList.querySelectorAll(".btn-dl-process").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const id = btn.getAttribute("data-task-id");
+          if (!id) return;
+          btn.disabled = true;
+          try {
+            const res = await fetch(`/api/downloads/${id}/process`, { method: "POST" });
+            const o = await res.json().catch(() => ({}));
+            if (!res.ok || o.ok === false) throw new Error(o.error || res.statusText);
+            const j = await fetchDownloadTasksRaw();
+            if (j) lastDownloadPayload = j;
+            renderDownloadTaskList();
+          } catch (e) {
+            alert(`处理失败：${e.message || e}`);
+          } finally {
+            btn.disabled = false;
+          }
+        });
+      });
+      replayManagerList.querySelectorAll(".btn-dl-play").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const id = btn.getAttribute("data-task-id");
+          if (!id) return;
+          try {
+            const res = await fetch(`/api/downloads/${id}/play`, { method: "POST" });
+            const o = await res.json().catch(() => ({}));
+            if (!res.ok || o.ok === false) throw new Error(o.error || res.statusText);
+            await afterLoadStartPlayingFromManager();
+          } catch (e) {
+            alert(`播放失败：${e.message || e}`);
+          }
+        });
+      });
+      replayManagerList.querySelectorAll(".btn-dl-delete").forEach((b) =>
         b.addEventListener("click", async () => {
           if (!confirm("确定删除该任务、已下载文件及其解析缓存？")) return;
           const id = b.getAttribute("data-task-id");
@@ -1825,6 +2121,86 @@ HTML_TEMPLATE = """<!doctype html>
           }
         })
       );
+      replayManagerList.querySelectorAll(".btn-local-play").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const enc = btn.getAttribute("data-local-path");
+          if (!enc) return;
+          let pathStr = "";
+          try {
+            pathStr = decodeURIComponent(enc);
+          } catch (e) {
+            return;
+          }
+          try {
+            const res = await fetch("/api/downloads/local/play", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ path: pathStr }),
+            });
+            const o = await res.json().catch(() => ({}));
+            if (!res.ok || o.ok === false) throw new Error(o.error || res.statusText);
+            await afterLoadStartPlayingFromManager();
+          } catch (e) {
+            alert(`播放失败：${e.message || e}`);
+          }
+        });
+      });
+      replayManagerList.querySelectorAll(".btn-local-process").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const enc = btn.getAttribute("data-local-path");
+          if (!enc) return;
+          let pathStr = "";
+          try {
+            pathStr = decodeURIComponent(enc);
+          } catch (e) {
+            return;
+          }
+          btn.disabled = true;
+          try {
+            const res = await fetch("/api/downloads/local/process", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ path: pathStr }),
+            });
+            const o = await res.json().catch(() => ({}));
+            if (!res.ok || o.ok === false) throw new Error(o.error || res.statusText);
+            const j = await fetchDownloadTasksRaw();
+            if (j) lastDownloadPayload = j;
+            renderDownloadTaskList();
+          } catch (e) {
+            alert(`处理失败：${e.message || e}`);
+          } finally {
+            btn.disabled = false;
+          }
+        });
+      });
+      replayManagerList.querySelectorAll(".btn-local-delete").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          if (!confirm("确定删除该录像文件及其解析缓存？")) return;
+          const enc = btn.getAttribute("data-local-path");
+          if (!enc) return;
+          let pathStr = "";
+          try {
+            pathStr = decodeURIComponent(enc);
+          } catch (e) {
+            return;
+          }
+          try {
+            const res = await fetch("/api/downloads/local/delete", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ path: pathStr }),
+            });
+            const o = await res.json().catch(() => ({}));
+            if (!res.ok || o.ok === false) throw new Error(o.error || res.statusText);
+            const j = await fetchDownloadTasksRaw();
+            if (j) lastDownloadPayload = j;
+            renderDownloadTaskList();
+          } catch (e) {
+            alert(`删除失败：${e.message || e}`);
+          }
+        });
+      });
     }
 
     async function pollDownloadTasksOnce() {
@@ -1836,6 +2212,7 @@ HTML_TEMPLATE = """<!doctype html>
     }
 
     openDownloadManagerBtn.addEventListener("click", async () => {
+      replayManagerPage = 1;
       downloadManagerModal.classList.add("open");
       await pollDownloadTasksOnce();
       renderDownloadTaskList();
@@ -1845,7 +2222,6 @@ HTML_TEMPLATE = """<!doctype html>
     const closeNewDownloadModal = () => {
       newDownloadModal.classList.remove("open");
       modalNewMatchIdInput.value = "";
-      modalNewNameInput.value = "";
     };
 
     downloadManagerCloseBtn.addEventListener("click", () => {
@@ -1864,32 +2240,66 @@ HTML_TEMPLATE = """<!doctype html>
       }
       downloadManagerCloseBtn.click();
     });
-    downloadSearchInput.addEventListener("input", () => renderDownloadTaskList());
+    downloadSearchInput.addEventListener("input", () => {
+      replayManagerPage = 1;
+      renderDownloadTaskList();
+    });
+    function syncDownloadSettingsControls() {
+      const mcVal = String(Math.max(1, Math.min(5, Number(lastDownloadPayload.max_concurrent) || 3)));
+      if (maxConcurrentSelect.value !== mcVal) maxConcurrentSelect.value = mcVal;
+      const autoParseWant = Boolean(lastDownloadPayload.auto_parse_after_download);
+      if (autoParseAfterDownloadCheckbox && autoParseAfterDownloadCheckbox.checked !== autoParseWant) {
+        autoParseAfterDownloadCheckbox.checked = autoParseWant;
+      }
+    }
+    function applyDownloadSettingsPayload(o) {
+      if (o.max_concurrent !== undefined) lastDownloadPayload.max_concurrent = o.max_concurrent;
+      if (o.auto_parse_after_download !== undefined) {
+        lastDownloadPayload.auto_parse_after_download = Boolean(o.auto_parse_after_download);
+      }
+      syncDownloadSettingsControls();
+    }
+    async function refreshDownloadSettingsFromServer() {
+      const j = await fetchDownloadTasksRaw();
+      if (j) {
+        lastDownloadPayload = j;
+        syncDownloadSettingsControls();
+      }
+    }
+    async function postDownloadSettings(partial) {
+      const res = await fetch("/api/downloads/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(partial),
+      });
+      const o = await res.json().catch(() => ({}));
+      if (!res.ok || !o.ok) throw new Error(o.error || res.statusText);
+      applyDownloadSettingsPayload(o);
+      return o;
+    }
     maxConcurrentSelect.addEventListener("change", async () => {
       const v = Math.max(1, Math.min(5, parseInt(maxConcurrentSelect.value, 10) || 3));
       maxConcurrentSelect.value = String(v);
       try {
-        const res = await fetch("/api/downloads/settings", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ max_concurrent: v }),
-        });
-        const o = await res.json();
-        if (!res.ok || !o.ok) throw new Error(o.error || res.statusText);
-        lastDownloadPayload.max_concurrent = o.max_concurrent;
-        maxConcurrentSelect.value = String(o.max_concurrent);
+        await postDownloadSettings({ max_concurrent: v });
       } catch (e) {
         alert(`设置失败：${e.message || e}`);
-        const j = await fetchDownloadTasksRaw();
-        if (j) {
-          lastDownloadPayload = j;
-          maxConcurrentSelect.value = String(Math.max(1, Math.min(5, Number(j.max_concurrent) || 3)));
-        }
+        await refreshDownloadSettingsFromServer();
       }
     });
+    if (autoParseAfterDownloadCheckbox) {
+      autoParseAfterDownloadCheckbox.addEventListener("change", async () => {
+        const checked = autoParseAfterDownloadCheckbox.checked;
+        try {
+          await postDownloadSettings({ auto_parse_after_download: checked });
+        } catch (e) {
+          alert(`设置失败：${e.message || e}`);
+          await refreshDownloadSettingsFromServer();
+        }
+      });
+    }
     openNewDownloadModalBtn.addEventListener("click", () => {
       modalNewMatchIdInput.value = "";
-      modalNewNameInput.value = "";
       newDownloadModal.classList.add("open");
       setTimeout(() => modalNewMatchIdInput.focus(), 50);
     });
@@ -1905,15 +2315,12 @@ HTML_TEMPLATE = """<!doctype html>
         alert("请输入有效比赛编号");
         return;
       }
-      const stem = modalNewNameInput.value.trim();
       confirmNewDownloadBtn.disabled = true;
       try {
-        const body = { match_id: mid };
-        if (stem) body.display_stem = stem;
         const res = await fetch("/api/downloads", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
+          body: JSON.stringify({ match_id: mid }),
         });
         const o = await res.json().catch(() => ({}));
         if (!res.ok || !o.ok) throw new Error(o.error || res.statusText);
@@ -1928,7 +2335,7 @@ HTML_TEMPLATE = """<!doctype html>
     });
 
     clearCacheBtn.addEventListener("click", async () => {
-      if (!data) return;
+      if (!data || data.session_ready === false) return;
       const ok = confirm("确定要删除当前录像的缓存文件吗？该操作不可撤销。");
       if (!ok) return;
       const ok2 = confirm("请再次确认：删除后下次将重新解析录像，可能较慢。是否继续？");
@@ -1952,7 +2359,7 @@ HTML_TEMPLATE = """<!doctype html>
       // debug+DSR-MAPDBG-01: 记录数据请求与首帧渲染耗时。
       debugLog("data-fetch-start");
       const fetchStartMs = performance.now();
-      const res = await fetch("/data");
+      const res = await fetch("/data", { cache: "no-store" });
       debugLog("data-fetch-response", {
         status: res.status,
         elapsedMs: Number((performance.now() - fetchStartMs).toFixed(1)),
@@ -1963,12 +2370,18 @@ HTML_TEMPLATE = """<!doctype html>
         gameEndTick: data.game_end_tick,
         players: (data.player_timelines || []).length,
       });
+      if (data.parse_progress) {
+        lastDownloadPayload.parse_progress = data.parse_progress;
+        if (!Array.isArray(lastDownloadPayload.parse_progress.queued_paths)) {
+          lastDownloadPayload.parse_progress.queued_paths = [];
+        }
+      }
       applyLoadedPayload();
       debugLog("bootstrap-render-called");
     })();
 
     window.addEventListener("resize", () => {
-      if (!data) return;
+      if (!data || data.session_ready === false) return;
       render(currentTick);
     });
   </script>
@@ -1983,7 +2396,9 @@ def parse_args() -> argparse.Namespace:
         "input_replay",
         nargs="?",
         default=None,
-        help="回放路径（.dem 或 .dem.bz2）。不传则尝试使用 replays/ 或 replay_samples/ 下第一个回放。",
+        help="仅用于 --export-json / --no-server 或显式指定文件：回放路径（.dem 或 .dem.bz2）。"
+        "启动 Web 时优先 .dsr_last_replay.json；若无记录则默认选用库列表首项（replays/ 与 replay_samples/，"
+        "排序与下载管理中本机列表一致），仍仅加载缓存、不自动全量解析。",
     )
     parser.add_argument("--host", default="127.0.0.1", help="Web 服务监听地址（默认 127.0.0.1）")
     parser.add_argument("--port", type=int, default=8765, help="Web 服务端口（默认 8765）")
@@ -2011,15 +2426,19 @@ def resolve_input_path(raw: str | None) -> Path:
         path = Path(raw).expanduser().resolve()
         if not path.exists():
             raise FileNotFoundError(f"输入回放不存在: {path}")
+        print(f"[boot] resolve_input_path：使用显式参数 path={path}")
         return path
 
+    print("[boot] resolve_input_path：未传路径，扫描默认目录 …")
     candidates = iter_default_replay_candidates()
     if not candidates:
         raise FileNotFoundError(
             "未提供 input_replay 且在 replays/ 与 replay_samples/ 下找不到回放文件。"
             "请用: python3 run.py <your.dem|your.dem.bz2>"
         )
-    return candidates[0]
+    chosen = candidates[0]
+    print(f"[boot] resolve_input_path：选用默认候选第一个 path={chosen}（共 {len(candidates)} 个候选）")
+    return chosen
 
 
 def ensure_dem_path(input_path: Path) -> Path:
@@ -2059,9 +2478,195 @@ def _print_parse_progress(current_tick: int, total_tick: int, done: bool = False
     sys.stdout.flush()
 
 
+LAST_REPLAY_JSON = Path(__file__).resolve().parent / ".dsr_last_replay.json"
+
+
+def read_last_replay_record() -> tuple[Path, int] | None:
+    if not LAST_REPLAY_JSON.is_file():
+        print(f"[boot] 上次录像记录文件不存在，跳过: {LAST_REPLAY_JSON}")
+        return None
+    try:
+        raw = json.loads(LAST_REPLAY_JSON.read_text(encoding="utf-8"))
+        p = Path(str(raw.get("dem_path", ""))).expanduser()
+        fps = int(raw.get("playback_fps", 30) or 30)
+        out = (p.resolve(), max(1, fps))
+        return out
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as e:
+        print(f"[boot] 上次录像记录无效或无法解析 ({type(e).__name__}): {LAST_REPLAY_JSON}")
+        return None
+
+
+def write_last_replay_record(dem_path: Path, playback_fps: int) -> None:
+    try:
+        LAST_REPLAY_JSON.write_text(
+            json.dumps(
+                {"dem_path": str(dem_path.resolve()), "playback_fps": int(max(1, playback_fps))},
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+def make_placeholder_gui_payload(playback_fps: int, *, open_download_manager: bool) -> dict[str, Any]:
+    fps = int(max(1, playback_fps))
+    return {
+        "match_id": 0,
+        "game_start_tick": 0,
+        "game_end_tick": 0,
+        "tick_rate": 30.0,
+        "playback_fps": fps,
+        "tick_game_time_relation": "(tick - game_start_tick) / tick_rate",
+        "map_bounds": {"min_x": 0.0, "max_x": 1.0, "min_y": 0.0, "max_y": 1.0},
+        "player_timelines": [],
+        "entity_timelines": [],
+        "dem_path": "",
+        "cache_enabled": False,
+        "cache_hit": False,
+        "cache_path": "",
+        "session_ready": False,
+        "open_download_manager": bool(open_download_manager),
+    }
+
+
+def try_load_payload_from_cache_only(replay_path: Path, playback_fps: int) -> tuple[dict[str, Any], Path] | None:
+    """仅从解析缓存恢复；不读取/解析 DEM。若无缓存返回 None。"""
+    if not replay_path.is_file():
+        print(f"[info] 启动仅缓存：录像路径不是文件，跳过: {replay_path}")
+        return None
+    dem_path = ensure_dem_path(replay_path)
+    cache_path = cache_path_for_dem(dem_path)
+    cached = load_replay_cache(dem_path)
+    if cached is None:
+        print(f"[info] 启动仅缓存：无 pkl，将走占位或稍后解析: dem={dem_path} cache={cache_path}")
+        return None
+    payload = dict(cached)
+    payload["playback_fps"] = int(max(playback_fps, 1))
+    payload["cache_enabled"] = True
+    payload["cache_hit"] = True
+    payload["cache_path"] = str(cache_path)
+    payload["session_ready"] = True
+    payload["open_download_manager"] = False
+    print(f"[info] 启动时命中缓存（未解析）: {cache_path}")
+    return payload, dem_path
+
+
+def _startup_replay_path_key(p: Path) -> str:
+    try:
+        return str(p.resolve()).replace("\\", "/").lower()
+    except OSError:
+        return str(p).replace("\\", "/").lower()
+
+
+def iter_ordered_startup_replay_paths(args: argparse.Namespace, rec: tuple[Path, int] | None) -> list[Path]:
+    """启动时尝试顺序：命令行仅一项；否则上次记录优先，再按本机库列表顺序去重追加。"""
+    out: list[Path] = []
+    seen: set[str] = set()
+
+    def add(raw: Path) -> None:
+        try:
+            pr = raw.expanduser().resolve()
+        except OSError:
+            return
+        k = _startup_replay_path_key(pr)
+        if k in seen:
+            return
+        seen.add(k)
+        out.append(pr)
+
+    if args.input_replay:
+        add(Path(args.input_replay))
+        return out
+    if rec is not None:
+        add(rec[0])
+    for row in list_stored_dem_files():
+        try:
+            add(Path(str(row.get("path", ""))).expanduser())
+        except OSError:
+            continue
+    return out
+
+
+def prepare_web_gui_session(args: argparse.Namespace) -> tuple[dict[str, Any], Path, bool]:
+    """启动 Web GUI：仅加载 .replay_cache；无命中则占位并打开下载管理。
+
+    多个候选时按 iter_ordered_startup_replay_paths 顺序尝试，直至首个已缓存项。"""
+    t_pw = time.perf_counter()
+    print("[boot] prepare_web_gui_session：开始（仅 .replay_cache，不解析 DEM）")
+    fps = max(1, int(args.fps or 30))
+    print(f"[info] Web 会话准备 fps={fps} cli_input_replay={args.input_replay!r}")
+
+    rec: tuple[Path, int] | None = None
+    if not args.input_replay:
+        rec = read_last_replay_record()
+        if rec is not None:
+            fps = max(1, rec[1])
+            print(f"[info] 上次播放记录: path={rec[0]} fps={fps}")
+        else:
+            print("[info] 无有效上次录像记录（文件缺失、内容无效或未配置）")
+    else:
+        print(f"[info] 使用命令行指定的录像路径: {args.input_replay!r}")
+
+    candidates = iter_ordered_startup_replay_paths(args, rec)
+    if args.input_replay:
+        if not candidates:
+            raise FileNotFoundError(f"输入回放不存在: {args.input_replay}")
+        if not candidates[0].is_file():
+            raise FileNotFoundError(f"输入回放不存在: {candidates[0]}")
+        print(f"[info] 使用命令行指定的录像: {candidates[0]}")
+    elif not candidates:
+        print("[info] 无任何可尝试的录像路径（库目录为空且无记录）")
+        print("[boot] 无将预加载的录像，将进入占位会话或自动打开下载管理")
+        pl = make_placeholder_gui_payload(fps, open_download_manager=True)
+        print(f"[boot] prepare_web_gui_session：结束（占位）({_boot_ms(t_pw):.0f}ms)")
+        return pl, replay_storage_root(), True
+
+    first_file: Path | None = None
+    for p in candidates:
+        if not p.is_file():
+            continue
+        if first_file is None:
+            first_file = p
+        hit = try_load_payload_from_cache_only(p, fps)
+        if hit is not None:
+            payload, dem_path = hit
+            write_last_replay_record(dem_path, payload.get("playback_fps", fps))
+            if args.input_replay:
+                src = "命令行参数"
+            elif rec is not None and _startup_replay_path_key(p) == _startup_replay_path_key(rec[0]):
+                src = f"上次播放记录（{LAST_REPLAY_JSON.name}）"
+            else:
+                src = "库列表顺延（首个已生成解析缓存的项）"
+            print(f"[boot] 将被加载的录像: {p}（来源：{src}）")
+            print(f"[info] Web 启动载入缓存完毕 match_id={payload.get('match_id')} dem={dem_path}")
+            print(f"[boot] prepare_web_gui_session：结束（命中缓存）({_boot_ms(t_pw):.0f}ms)")
+            return payload, dem_path.resolve(), False
+
+    hint = replay_storage_root()
+    if first_file is not None:
+        try:
+            hint = ensure_dem_path(first_file).resolve()
+        except OSError:
+            try:
+                hint = first_file.resolve()
+            except OSError:
+                hint = first_file
+        print(f"[info] 候选录像均无解析缓存，请在下载管理中先「处理」。参考路径: {first_file}")
+    else:
+        print("[info] 候选路径均非有效文件，占位")
+    pl = make_placeholder_gui_payload(fps, open_download_manager=True)
+    print(f"[info] 占位会话 open_dm=True dem_hint={hint}")
+    print(f"[boot] prepare_web_gui_session：结束（占位，待下载管理）({_boot_ms(t_pw):.0f}ms)")
+    return pl, hint, True
+
+
 def _collect_parse_with_progress(
     dem_path: Path,
     estimated_end_tick: int,
+    on_tick_progress: Callable[[int, int], None] | None = None,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> tuple[ReplayParser, PlayerExtractor, WorldEntityCollector]:
     parser = ReplayParser(str(dem_path))
     # 使用逐 tick 采样，确保刷新率提升时有足够细粒度的数据可更新。
@@ -2074,18 +2679,28 @@ def _collect_parse_with_progress(
     last_report_tick = -10**9
 
     def _progress_callback(_entity: Any, _op: Any) -> None:
+        if cancel_check is not None and cancel_check():
+            raise ParseCancelledError()
         nonlocal last_report_tick
         tick = int(parser.tick)
         if tick - last_report_tick < 180:
             return
         last_report_tick = tick
+        if on_tick_progress is not None:
+            on_tick_progress(tick, progress_total)
         _print_parse_progress(tick, progress_total, done=False)
 
     parser.on_entity(_progress_callback)
     _print_parse_progress(0, progress_total, done=False)
+    if on_tick_progress is not None:
+        on_tick_progress(0, progress_total)
+    if cancel_check is not None and cancel_check():
+        raise ParseCancelledError()
     parser.parse()
     final_tick = min(max(int(parser.tick), 0), progress_total)
     _print_parse_progress(final_tick, progress_total, done=True)
+    if on_tick_progress is not None:
+        on_tick_progress(final_tick, progress_total)
     return parser, player_ext, world_ext
 
 
@@ -2150,11 +2765,20 @@ def _build_death_windows(ticks: list[int], states: list[dict[str, Any]]) -> list
     return windows
 
 
-def build_gui_payload(replay_path: Path, playback_fps: int) -> tuple[dict[str, Any], Path]:
+class ReplayCacheMissingError(Exception):
+    """Web 播放/载入仅允许使用 .replay_cache；未命中缓存时抛出。"""
+
+
+def build_gui_payload(
+    replay_path: Path,
+    playback_fps: int,
+    *,
+    parse_progress_cb: Callable[[int, int], None] | None = None,
+    allow_parse: bool = True,
+    cancel_check: Callable[[], bool] | None = None,
+) -> tuple[dict[str, Any], Path]:
     print(f"[info] 读取回放: {replay_path}")
     dem_path = ensure_dem_path(replay_path)
-    print(f"[info] 解析 DEM: {dem_path}")
-
     cache_path = cache_path_for_dem(dem_path)
     cached = load_replay_cache(dem_path)
     if cached is not None:
@@ -2163,140 +2787,406 @@ def build_gui_payload(replay_path: Path, playback_fps: int) -> tuple[dict[str, A
         payload["cache_enabled"] = True
         payload["cache_hit"] = True
         payload["cache_path"] = str(cache_path)
+        payload["session_ready"] = True
+        payload["open_download_manager"] = False
         print(f"[info] 命中缓存: {cache_path}")
         return payload, dem_path
 
+    if not allow_parse:
+        raise ReplayCacheMissingError(
+            "该录像尚无解析缓存；播放与载入仅使用已解析数据。请在下载管理中点击「处理」生成缓存后再试。"
+            f" dem={dem_path} cache={cache_path}"
+        )
+
+    print(f"[info] 解析 DEM: {dem_path}")
+    print(f"[info] 缓存未命中，开始 gem 元数据 + 全量 tick 解析: cache_path={cache_path}")
     match = gem.parse(str(dem_path))
-    parser, player_ext, world_ext = _collect_parse_with_progress(
-        dem_path,
-        estimated_end_tick=max(int(match.game_end_tick), 1),
-    )
-    tick_rate = compute_tick_rate(match)
+    est = max(int(match.game_end_tick), 1)
+    try:
+        parser, player_ext, world_ext = _collect_parse_with_progress(
+            dem_path,
+            estimated_end_tick=est,
+            on_tick_progress=parse_progress_cb,
+            cancel_check=cancel_check,
+        )
+        tick_rate = compute_tick_rate(match)
 
-    player_timelines: dict[int, dict[str, Any]] = {}
-    hero_to_pid: dict[str, int] = {}
-    for pp in match.players:
-        pid = int(pp.player_id)
-        hero = str(pp.hero_name)
-        player_timelines[pid] = {
-            "player_id": pid,
-            "player_name": str(pp.player_name or ""),
-            "hero_name": hero,
-            "team": int(pp.team),
-            "final_kda": {
-                "kills": int(pp.kills),
-                "deaths": int(pp.deaths),
-                "assists": int(pp.assists),
-            },
-            "kill_event_ticks": [],
-            "ticks": [],
-            "states": [],
-            "death_windows": [],
-        }
-        if hero:
-            hero_to_pid[hero.lower()] = pid
+        player_timelines: dict[int, dict[str, Any]] = {}
+        hero_to_pid: dict[str, int] = {}
+        for pp in match.players:
+            pid = int(pp.player_id)
+            hero = str(pp.hero_name)
+            player_timelines[pid] = {
+                "player_id": pid,
+                "player_name": str(pp.player_name or ""),
+                "hero_name": hero,
+                "team": int(pp.team),
+                "final_kda": {
+                    "kills": int(pp.kills),
+                    "deaths": int(pp.deaths),
+                    "assists": int(pp.assists),
+                },
+                "kill_event_ticks": [],
+                "ticks": [],
+                "states": [],
+                "death_windows": [],
+            }
+            if hero:
+                hero_to_pid[hero.lower()] = pid
 
-    for entry in match.combat_log:
-        if (
-            entry.log_type == "DEATH"
-            and entry.attacker_is_hero
-            and entry.target_is_hero
-            and entry.attacker_name
-        ):
-            pid = hero_to_pid.get(entry.attacker_name.lower())
-            if pid is not None:
-                player_timelines[pid]["kill_event_ticks"].append(int(entry.tick))
+        for entry in match.combat_log:
+            if (
+                entry.log_type == "DEATH"
+                and entry.attacker_is_hero
+                and entry.target_is_hero
+                and entry.attacker_name
+            ):
+                pid = hero_to_pid.get(entry.attacker_name.lower())
+                if pid is not None:
+                    player_timelines[pid]["kill_event_ticks"].append(int(entry.tick))
 
-    min_x = float("inf")
-    max_x = float("-inf")
-    min_y = float("inf")
-    max_y = float("-inf")
+        min_x = float("inf")
+        max_x = float("-inf")
+        min_y = float("inf")
+        max_y = float("-inf")
 
-    for snap in player_ext.snapshots:
-        pid = int(snap.player_id)
-        if pid not in player_timelines:
-            continue
-        resolved_level = _xp_to_level(int(snap.xp))
-        state = {
-            "x": None if snap.x is None else float(snap.x),
-            "y": None if snap.y is None else float(snap.y),
-            "hp": int(snap.hp),
-            "max_hp": int(snap.max_hp),
-            "mana": float(snap.mana),
-            "max_mana": float(snap.max_mana),
-            "level": int(resolved_level),
-            "net_worth": int(snap.net_worth),
-            "lh": int(snap.lh),
-            "dn": int(snap.dn),
-            "total_deaths": int(snap.total_deaths),
-        }
-        player_timelines[pid]["ticks"].append(int(snap.tick))
-        player_timelines[pid]["states"].append(state)
-        if state["x"] is not None and state["y"] is not None:
-            min_x = min(min_x, state["x"])
-            max_x = max(max_x, state["x"])
-            min_y = min(min_y, state["y"])
-            max_y = max(max_y, state["y"])
-
-    entity_timelines = world_ext.to_payload()
-    for row in entity_timelines:
-        for st in row.get("states", []):
-            x = st.get("x")
-            y = st.get("y")
-            if x is None or y is None:
+        for snap in player_ext.snapshots:
+            pid = int(snap.player_id)
+            if pid not in player_timelines:
                 continue
-            min_x = min(min_x, float(x))
-            max_x = max(max_x, float(x))
-            min_y = min(min_y, float(y))
-            max_y = max(max_y, float(y))
+            resolved_level = _xp_to_level(int(snap.xp))
+            state = {
+                "x": None if snap.x is None else float(snap.x),
+                "y": None if snap.y is None else float(snap.y),
+                "hp": int(snap.hp),
+                "max_hp": int(snap.max_hp),
+                "mana": float(snap.mana),
+                "max_mana": float(snap.max_mana),
+                "level": int(resolved_level),
+                "net_worth": int(snap.net_worth),
+                "lh": int(snap.lh),
+                "dn": int(snap.dn),
+                "total_deaths": int(snap.total_deaths),
+            }
+            player_timelines[pid]["ticks"].append(int(snap.tick))
+            player_timelines[pid]["states"].append(state)
+            if state["x"] is not None and state["y"] is not None:
+                min_x = min(min_x, state["x"])
+                max_x = max(max_x, state["x"])
+                min_y = min(min_y, state["y"])
+                max_y = max(max_y, state["y"])
 
-    for timeline in player_timelines.values():
-        timeline["kill_event_ticks"] = sorted(int(x) for x in timeline["kill_event_ticks"])
-        timeline["death_windows"] = _build_death_windows(timeline["ticks"], timeline["states"])
+        entity_timelines = world_ext.to_payload()
+        for row in entity_timelines:
+            for st in row.get("states", []):
+                x = st.get("x")
+                y = st.get("y")
+                if x is None or y is None:
+                    continue
+                min_x = min(min_x, float(x))
+                max_x = max(max_x, float(x))
+                min_y = min(min_y, float(y))
+                max_y = max(max_y, float(y))
 
-    if min_x == float("inf"):
-        min_x, max_x, min_y, max_y = 0.0, 1.0, 0.0, 1.0
+        for timeline in player_timelines.values():
+            timeline["kill_event_ticks"] = sorted(int(x) for x in timeline["kill_event_ticks"])
+            timeline["death_windows"] = _build_death_windows(timeline["ticks"], timeline["states"])
 
-    game_end_tick = max(int(match.game_end_tick), int(parser.tick))
-    payload = {
-        "dem_path": str(dem_path),
-        "match_id": int(match.match_id),
-        "game_start_tick": int(match.game_start_tick),
-        "game_end_tick": game_end_tick,
-        "tick_rate": tick_rate,
-        "playback_fps": int(max(playback_fps, 1)),
-        # tick 与游戏时间换算关系：
-        # game_time_seconds = (tick - game_start_tick) / tick_rate
-        "tick_game_time_relation": "(tick - game_start_tick) / tick_rate",
-        "map_bounds": {
-            "min_x": float(min_x),
-            "max_x": float(max_x),
-            "min_y": float(min_y),
-            "max_y": float(max_y),
-        },
-        "player_timelines": [player_timelines[k] for k in sorted(player_timelines.keys())],
-        "entity_timelines": entity_timelines,
-    }
-    save_replay_cache(dem_path, payload)
-    payload["cache_enabled"] = True
-    payload["cache_hit"] = False
-    payload["cache_path"] = str(cache_path)
-    print(f"[info] 已写入缓存: {cache_path}")
-    print(
-        f"[info] 回放范围: 0 -> {payload['game_end_tick']} (game_start_tick={payload['game_start_tick']}), "
-        f"tick_rate={payload['tick_rate']:.2f}, 玩家轨迹={len(payload['player_timelines'])}, "
-        f"世界实体轨迹={len(payload['entity_timelines'])}"
-    )
-    return payload, dem_path
+        if min_x == float("inf"):
+            min_x, max_x, min_y, max_y = 0.0, 1.0, 0.0, 1.0
+
+        game_end_tick = max(int(match.game_end_tick), int(parser.tick))
+        payload = {
+            "dem_path": str(dem_path),
+            "match_id": int(match.match_id),
+            "game_start_tick": int(match.game_start_tick),
+            "game_end_tick": game_end_tick,
+            "tick_rate": tick_rate,
+            "playback_fps": int(max(playback_fps, 1)),
+            "tick_game_time_relation": "(tick - game_start_tick) / tick_rate",
+            "map_bounds": {
+                "min_x": float(min_x),
+                "max_x": float(max_x),
+                "min_y": float(min_y),
+                "max_y": float(max_y),
+            },
+            "player_timelines": [player_timelines[k] for k in sorted(player_timelines.keys())],
+            "entity_timelines": entity_timelines,
+        }
+        save_replay_cache(dem_path, payload)
+        payload["cache_enabled"] = True
+        payload["cache_hit"] = False
+        payload["cache_path"] = str(cache_path)
+        payload["session_ready"] = True
+        payload["open_download_manager"] = False
+        print(f"[info] 已写入缓存: {cache_path}")
+        print(
+            f"[info] 回放范围: 0 -> {payload['game_end_tick']} (game_start_tick={payload['game_start_tick']}), "
+            f"tick_rate={payload['tick_rate']:.2f}, 玩家轨迹={len(payload['player_timelines'])}, "
+            f"世界实体轨迹={len(payload['entity_timelines'])}"
+        )
+        return payload, dem_path
+    except ParseCancelledError:
+        try:
+            delete_replay_cache(dem_path)
+        except OSError:
+            pass
+        print(f"[info] 解析已取消，已尝试清理缓存: dem={dem_path}")
+        raise
+    finally:
+        if parse_progress_cb is not None:
+            try:
+                parse_progress_cb(-1, -1)
+            except Exception:
+                pass
+
+
+def library_file_playback_ready(path_str: str) -> bool:
+    """本机库路径是否已有可复用的解析缓存（.dem.bz2 以解压后的 .dem 为准）。"""
+    try:
+        p = Path(str(path_str))
+        if not p.is_file():
+            return False
+        if p.name.lower().endswith(".dem.bz2"):
+            dem = p.parent / p.stem
+            if not dem.is_file():
+                return False
+            return cache_path_for_dem(dem).exists()
+        if p.suffix.lower() == ".dem" and not p.name.lower().endswith(".dem.bz2"):
+            return cache_path_for_dem(p).exists()
+    except OSError:
+        return False
+    return False
+
+
+def annotate_local_replays_with_cache(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    for it in rows:
+        it["playback_ready"] = library_file_playback_ready(str(it.get("path", "")))
+        try:
+            dp = ensure_dem_path(Path(str(it.get("path", ""))))
+            it["dem_norm_key"] = norm_dem_storage_key(dp)
+        except OSError:
+            it["dem_norm_key"] = norm_dem_storage_key(Path(str(it.get("path", ""))))
+    return rows
+
+
+def enrich_download_task(task: dict[str, Any]) -> dict[str, Any]:
+    t = dict(task)
+    t["playback_ready"] = False
+    t["cache_exists"] = False
+    t["output_size"] = None
+    t["dem_norm_key"] = None
+    op = task.get("output_dem_path")
+    if task.get("state") == "completed" and op:
+        dem = Path(str(op))
+        if dem.is_file():
+            try:
+                t["cache_exists"] = cache_path_for_dem(dem).exists()
+                t["playback_ready"] = t["cache_exists"]
+                t["output_size"] = int(dem.stat().st_size)
+                t["dem_norm_key"] = norm_dem_storage_key(ensure_dem_path(dem))
+            except OSError:
+                t["dem_norm_key"] = norm_dem_storage_key(dem)
+    return t
 
 
 def run_server(host: str, port: int, payload: dict[str, Any], dem_path: Path, open_browser: bool) -> None:
-    ctx: dict[str, Any] = {"payload": payload, "dem_path": dem_path.resolve()}
+    t_rs = time.perf_counter()
+    try:
+        dp0 = dem_path.resolve()
+    except OSError:
+        dp0 = dem_path
+    print(
+        f"[boot] run_server：开始 host={host!r} port={port} open_browser={open_browser} "
+        f"session_ready={payload.get('session_ready', True)} "
+        f"将被加载/当前会话 dem={dp0}"
+    )
+    ctx: dict[str, Any] = {"payload": payload, "dem_path": Path(dp0)}
     lock = threading.Lock()
     download_mgr = DownloadTaskManager()
+    print(f"[boot] run_server：DownloadTaskManager 已创建 ({_boot_ms(t_rs):.0f}ms)")
+    print(
+        f"[info] Web 服务初始状态 dem={dp0} session_ready={payload.get('session_ready', True)} "
+        f"match_id={payload.get('match_id')} open_download_manager={payload.get('open_download_manager')}"
+    )
+    print(f"[boot] run_server：上下文与解析进度状态已初始化 ({_boot_ms(t_rs):.0f}ms)")
+
+    remarks_lock = threading.Lock()
+    user_remarks: dict[str, dict[str, str]] = _load_user_remarks()
+
+    parse_progress: dict[str, Any] = {"active": False, "dem_path": None, "pct": 0.0}
+    parse_worker_stop = threading.Event()
+    parse_q_lock = threading.Lock()
+    parse_q_cv = threading.Condition(parse_q_lock)
+    parse_deque: deque[tuple[Path, str]] = deque()
+    parse_q_set: set[str] = set()
+    parse_cancel_flag = [False]
+
+    def parse_progress_for_client() -> dict[str, Any]:
+        with parse_q_lock:
+            queued_paths = [k for _, k in parse_deque]
+        return {
+            "active": bool(parse_progress["active"]),
+            "dem_path": parse_progress["dem_path"],
+            "pct": float(parse_progress["pct"] or 0.0),
+            "queued_paths": queued_paths,
+        }
+
+    def parse_progress_cb_for_replay(replay_p: Path) -> Callable[[int, int], None]:
+        dem_ref = ensure_dem_path(replay_p)
+        key = norm_dem_storage_key(dem_ref)
+        last_log_bucket = [-1]
+
+        def cb(cur: int, tot: int) -> None:
+            if cur < 0 or tot < 0:
+                if parse_progress["active"]:
+                    print(f"[web] 解析进度回调结束 dem={key} 收尾前 pct={parse_progress['pct']:.1f}%")
+                last_log_bucket[0] = -1
+                parse_progress["active"] = False
+                parse_progress["pct"] = 0.0
+                parse_progress["dem_path"] = None
+                return
+            parse_progress["active"] = True
+            parse_progress["dem_path"] = key
+            parse_progress["pct"] = min(99.0, 100.0 * float(cur) / max(float(tot), 1.0))
+            b = int(parse_progress["pct"] // 10)
+            if b != last_log_bucket[0]:
+                last_log_bucket[0] = b
+                print(f"[web] 解析进度约 {parse_progress['pct']:.0f}% tick={cur}/{tot} dem={key}")
+
+        return cb
+
+    def enqueue_parse_request(replay_path: Path) -> dict[str, Any]:
+        dem_ref = ensure_dem_path(replay_path)
+        key = norm_dem_storage_key(dem_ref)
+        with parse_q_lock:
+            if bool(parse_progress["active"]) and parse_progress["dem_path"] == key:
+                return {"ok": True, "queued": False, "duplicate": True}
+            if key in parse_q_set:
+                return {"ok": True, "queued": False, "duplicate": True}
+            parse_deque.append((dem_ref, key))
+            parse_q_set.add(key)
+            parse_q_cv.notify()
+        return {"ok": True, "queued": True, "duplicate": False}
+
+    def cancel_parse_for_key(norm_key: str) -> dict[str, Any]:
+        nk = (norm_key or "").strip().lower()
+        removed_queue = False
+        cancelled_active = False
+        with parse_q_lock:
+            if nk in parse_q_set:
+                newd: deque[tuple[Path, str]] = deque()
+                for p_item, k_item in parse_deque:
+                    if k_item != nk:
+                        newd.append((p_item, k_item))
+                    else:
+                        removed_queue = True
+                parse_deque.clear()
+                parse_deque.extend(newd)
+                parse_q_set.discard(nk)
+            if bool(parse_progress["active"]) and parse_progress["dem_path"] == nk:
+                parse_cancel_flag[0] = True
+                cancelled_active = True
+        return {"ok": True, "removed_queue": removed_queue, "cancelled_active": cancelled_active}
+
+    def parse_worker() -> None:
+        while not parse_worker_stop.is_set():
+            with parse_q_lock:
+                while not parse_deque and not parse_worker_stop.is_set():
+                    parse_q_cv.wait(timeout=0.3)
+                if parse_worker_stop.is_set() and not parse_deque:
+                    return
+                if not parse_deque:
+                    continue
+                dem_item, key = parse_deque.popleft()
+                parse_q_set.discard(key)
+                parse_cancel_flag[0] = False
+                parse_progress["active"] = True
+                parse_progress["dem_path"] = key
+                parse_progress["pct"] = 0.0
+            pc = parse_progress_cb_for_replay(dem_item)
+            try:
+                build_gui_payload(
+                    dem_item,
+                    playback_fps=_current_fps(),
+                    parse_progress_cb=pc,
+                    allow_parse=True,
+                    cancel_check=lambda: parse_cancel_flag[0],
+                )
+            except ParseCancelledError:
+                print(f"[web] 解析已取消 dem={key}")
+            except Exception as ex:
+                print(f"[web] 解析线程异常 dem={key}: {ex}")
+            finally:
+                parse_cancel_flag[0] = False
+                try:
+                    pc(-1, -1)
+                except Exception:
+                    pass
+
+    threading.Thread(target=parse_worker, name="parse-queue", daemon=True).start()
+
+    def _auto_parse_after_download_fn(dem_p: Path) -> None:
+        enqueue_parse_request(dem_p)
+
+    download_mgr.set_auto_parse_callback(_auto_parse_after_download_fn)
+
+    def _current_fps() -> int:
+        with lock:
+            return int(ctx["payload"].get("playback_fps", 30) or 30)
+
+    def _apply_loaded_replay_payload(new_payload: dict[str, Any], new_dem: Path, fallback_fps: int) -> tuple[str, Any]:
+        with lock:
+            new_payload["open_download_manager"] = False
+            ctx["payload"] = new_payload
+            ctx["dem_path"] = new_dem.resolve()
+            applied_fps = int(new_payload.get("playback_fps", fallback_fps) or fallback_fps)
+            write_last_replay_record(ctx["dem_path"], applied_fps)
+            dem_out = str(ctx["dem_path"])
+        return dem_out, new_payload["match_id"]
+
+    def _switch_replay_session(replay_path: Path, *, allow_parse: bool) -> tuple[str, Any]:
+        fps = _current_fps()
+        new_payload, new_dem = build_gui_payload(
+            replay_path,
+            playback_fps=fps,
+            parse_progress_cb=parse_progress_cb_for_replay(replay_path),
+            allow_parse=allow_parse,
+        )
+        return _apply_loaded_replay_payload(new_payload, new_dem, fps)
+
+    def _enqueue_process_replay(replay_path: Path) -> dict[str, Any]:
+        return enqueue_parse_request(replay_path)
+
+    def _read_local_library_path(body: dict[str, Any], deny_error: str) -> Path:
+        p = Path(str(body.get("path", ""))).expanduser()
+        try:
+            p = p.resolve()
+        except OSError as ex:
+            raise ValueError("路径无效") from ex
+        if not is_replay_library_path(p):
+            raise ValueError(deny_error)
+        return p
+
+    def _read_task_dem_path(tid: str, *, only_completed: bool) -> Path:
+        with lock:
+            tasks = {t["id"]: t for t in download_mgr.list_tasks()}
+            info = tasks.get(tid)
+            if only_completed:
+                if not info or info.get("state") != "completed" or not info.get("output_dem_path"):
+                    raise ValueError("仅已完成任务可生成缓存")
+            else:
+                if not info or not info.get("output_dem_path"):
+                    raise ValueError("任务未完成或无文件")
+            dem_file = Path(str(info["output_dem_path"]))
+        if not dem_file.is_file():
+            raise FileNotFoundError("录像文件不存在")
+        return dem_file
 
     def current_payload_bytes() -> bytes:
-        return json.dumps(ctx["payload"], ensure_ascii=False).encode("utf-8")
+        out = dict(ctx["payload"])
+        out["parse_progress"] = parse_progress_for_client()
+        return json.dumps(out, ensure_ascii=False).encode("utf-8")
 
     def _read_json_body(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
         n = int(handler.headers.get("Content-Length", "0") or "0")
@@ -2311,7 +3201,9 @@ def run_server(host: str, port: int, payload: dict[str, Any], dem_path: Path, op
         handler.end_headers()
         handler.wfile.write(body)
 
+    print(f"[boot] run_server：正在编码内置 HTML 模板 ({_boot_ms(t_rs):.0f}ms)")
     html_bytes = HTML_TEMPLATE.encode("utf-8")
+    print(f"[boot] run_server：HTML 模板就绪 len={len(html_bytes)} ({_boot_ms(t_rs):.0f}ms)")
     # debug+DSR-MAPDBG-01: 服务端静态底图读取与请求日志，定位是否卡在图片传输。
     map_bg_path = Path(__file__).resolve().parent / "assets" / "maps" / "map_full.png"
     map_bg_bytes = map_bg_path.read_bytes() if map_bg_path.exists() else None
@@ -2319,19 +3211,39 @@ def run_server(host: str, port: int, payload: dict[str, Any], dem_path: Path, op
         f"[debug+DSR-MAPDBG-01] map-bg-init path={map_bg_path} "
         f"exists={map_bg_path.exists()} size={0 if map_bg_bytes is None else len(map_bg_bytes)}"
     )
+    print(f"[boot] run_server：底图资源已加载 ({_boot_ms(t_rs):.0f}ms)")
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
             req_path = urlparse(self.path).path
             if req_path == "/api/downloads":
-                tasks = download_mgr.list_tasks()
+                with remarks_lock:
+                    r_copy = {
+                        "by_path": dict(user_remarks["by_path"]),
+                        "by_task": dict(user_remarks["by_task"]),
+                    }
+                tasks: list[dict[str, Any]] = []
+                for t in download_mgr.list_tasks():
+                    td = enrich_download_task(t)
+                    tid = str(td.get("id", ""))
+                    dk = td.get("dem_norm_key")
+                    td["user_remark"] = (r_copy["by_task"].get(tid, "") or (r_copy["by_path"].get(dk, "") if dk else ""))[
+                        :2000
+                    ]
+                    tasks.append(td)
+                locals_raw = annotate_local_replays_with_cache(list_stored_dem_files())
+                for row in locals_raw:
+                    rk = row.get("dem_norm_key")
+                    row["user_remark"] = (r_copy["by_path"].get(rk, "") if rk else "")[:2000]
                 _send_json(
                     self,
                     200,
                     {
                         "tasks": tasks,
                         "max_concurrent": download_mgr.get_max_concurrent(),
-                        "local_replays": list_stored_dem_files(),
+                        "auto_parse_after_download": download_mgr.get_auto_parse_after_download(),
+                        "local_replays": locals_raw,
+                        "parse_progress": parse_progress_for_client(),
                         "storage_roots": {
                             "replays": str(replay_storage_root().resolve()),
                             "replay_samples": str(legacy_replay_samples_dir().resolve()),
@@ -2346,10 +3258,12 @@ def run_server(host: str, port: int, payload: dict[str, Any], dem_path: Path, op
                 self.end_headers()
                 self.wfile.write(html_bytes)
                 return
-            if self.path == "/data":
+            if req_path == "/data":
                 payload_bytes = current_payload_bytes()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+                self.send_header("Pragma", "no-cache")
                 self.send_header("Content-Length", str(len(payload_bytes)))
                 self.end_headers()
                 self.wfile.write(payload_bytes)
@@ -2373,31 +3287,25 @@ def run_server(host: str, port: int, payload: dict[str, Any], dem_path: Path, op
         def do_POST(self) -> None:  # noqa: N802
             req_path = urlparse(self.path).path
             if req_path == "/api/downloads/local/load":
+                print(f"[http] POST {req_path} client={self.client_address[0]}")
                 try:
                     body = _read_json_body(self)
-                    p = Path(str(body.get("path", ""))).expanduser()
-                    try:
-                        p = p.resolve()
-                    except OSError:
-                        _send_json(self, 400, {"ok": False, "error": "路径无效"})
-                        return
-                    if not is_replay_library_path(p):
-                        _send_json(self, 400, {"ok": False, "error": "仅允许载入 replays/ 或 replay_samples/ 下的录像"})
-                        return
-                    with lock:
-                        fps = int(ctx["payload"].get("playback_fps", 30) or 30)
-                        new_payload, new_dem = build_gui_payload(p, playback_fps=fps)
-                        ctx["payload"] = new_payload
-                        ctx["dem_path"] = new_dem.resolve()
-                    _send_json(
-                        self,
-                        200,
-                        {"ok": True, "dem_path": str(ctx["dem_path"]), "match_id": new_payload["match_id"]},
-                    )
+                    p = _read_local_library_path(body, "仅允许载入 replays/ 或 replay_samples/ 下的录像")
+                    dem_out, match_id = _switch_replay_session(p, allow_parse=False)
+                    print(f"[http] local/load 成功 match_id={match_id} dem={dem_out}")
+                    _send_json(self, 200, {"ok": True, "dem_path": dem_out, "match_id": match_id})
+                except ValueError as e:
+                    print(f"[http] local/load 参数错误: {e}")
+                    _send_json(self, 400, {"ok": False, "error": str(e)})
+                except ReplayCacheMissingError as e:
+                    print(f"[http] local/load 无可用缓存: {e}")
+                    _send_json(self, 400, {"ok": False, "error": str(e)})
                 except Exception as e:
+                    print(f"[http] local/load 失败: {e}")
                     _send_json(self, 502, {"ok": False, "error": str(e)})
                 return
             if req_path == "/api/downloads/local/delete":
+                print(f"[http] POST {req_path} client={self.client_address[0]}")
                 try:
                     body = _read_json_body(self)
                     p = Path(str(body.get("path", ""))).expanduser()
@@ -2425,33 +3333,129 @@ def run_server(host: str, port: int, payload: dict[str, Any], dem_path: Path, op
                             delete_replay_cache(bz2_sibling)
                             bz2_sibling.unlink(missing_ok=True)
                     _send_json(self, 200, {"ok": True})
+                    print(f"[http] local/delete 成功 path={p}")
                 except Exception as e:
+                    print(f"[http] local/delete 失败: {e}")
+                    _send_json(self, 502, {"ok": False, "error": str(e)})
+                return
+            if req_path == "/api/downloads/parse/cancel":
+                print(f"[http] POST {req_path} client={self.client_address[0]}")
+                try:
+                    body = _read_json_body(self)
+                    nk = body.get("dem_norm_key")
+                    if isinstance(nk, str) and nk.strip():
+                        out = cancel_parse_for_key(nk.strip())
+                    elif body.get("task_id"):
+                        dem_file = _read_task_dem_path(str(body["task_id"]), only_completed=True)
+                        out = cancel_parse_for_key(norm_dem_storage_key(ensure_dem_path(dem_file)))
+                    else:
+                        raise ValueError("请提供 dem_norm_key 或 task_id")
+                    _send_json(self, 200, {"ok": True, **out})
+                except ValueError as e:
+                    _send_json(self, 400, {"ok": False, "error": str(e)})
+                except Exception as e:
+                    print(f"[http] parse/cancel 失败: {e}")
+                    _send_json(self, 502, {"ok": False, "error": str(e)})
+                return
+            if req_path == "/api/downloads/local/remark":
+                print(f"[http] POST {req_path} client={self.client_address[0]}")
+                try:
+                    body = _read_json_body(self)
+                    p = _read_local_library_path(body, "仅允许为 replays/ 或 replay_samples/ 下的录像设置备注")
+                    remark = body.get("user_remark", "")
+                    if not isinstance(remark, str):
+                        raise ValueError("user_remark 必须是字符串")
+                    key = norm_dem_storage_key(ensure_dem_path(p))
+                    with remarks_lock:
+                        user_remarks["by_path"][key] = remark.strip()[:2000]
+                        _save_user_remarks(user_remarks)
+                    _send_json(self, 200, {"ok": True})
+                except ValueError as e:
+                    _send_json(self, 400, {"ok": False, "error": str(e)})
+                except Exception as e:
+                    print(f"[http] local/remark 失败: {e}")
+                    _send_json(self, 502, {"ok": False, "error": str(e)})
+                return
+            if req_path == "/api/downloads/local/process":
+                print(f"[http] POST {req_path} client={self.client_address[0]}")
+                try:
+                    body = _read_json_body(self)
+                    p = _read_local_library_path(body, "仅允许处理 replays/ 或 replay_samples/ 下的录像")
+                    out = _enqueue_process_replay(p)
+                    print(f"[http] local/process 入队 path={p} out={out}")
+                    _send_json(self, 200, {"ok": True, **out})
+                except ValueError as e:
+                    print(f"[http] local/process 参数错误: {e}")
+                    _send_json(self, 400, {"ok": False, "error": str(e)})
+                except Exception as e:
+                    print(f"[http] local/process 失败: {e}")
+                    _send_json(self, 502, {"ok": False, "error": str(e)})
+                return
+            if req_path == "/api/downloads/local/play":
+                print(f"[http] POST {req_path} client={self.client_address[0]}")
+                try:
+                    body = _read_json_body(self)
+                    p = _read_local_library_path(body, "仅允许播放 replays/ 或 replay_samples/ 下的录像")
+                    dem_out, match_id = _switch_replay_session(p, allow_parse=False)
+                    print(f"[http] local/play 成功 match_id={match_id} dem={dem_out}")
+                    _send_json(self, 200, {"ok": True, "dem_path": dem_out, "match_id": match_id})
+                except ValueError as e:
+                    print(f"[http] local/play 参数错误: {e}")
+                    _send_json(self, 400, {"ok": False, "error": str(e)})
+                except ReplayCacheMissingError as e:
+                    print(f"[http] local/play 无可用缓存: {e}")
+                    _send_json(self, 400, {"ok": False, "error": str(e)})
+                except Exception as e:
+                    print(f"[http] local/play 失败: {e}")
                     _send_json(self, 502, {"ok": False, "error": str(e)})
                 return
             if req_path == "/api/downloads":
+                print(f"[http] POST {req_path} client={self.client_address[0]}")
                 try:
                     body = _read_json_body(self)
                     mid = int(body.get("match_id", 0))
-                    name = body.get("display_stem") or body.get("name")
-                    if isinstance(name, str):
-                        name = name.strip() or None
-                    else:
-                        name = None
-                    task = download_mgr.create_task(mid, name or str(mid))
+                    task = download_mgr.create_task(mid, None)
+                    print(f"[http] 已创建下载任务 id={task.id} match_id={mid}")
                     _send_json(self, 200, {"ok": True, "task": task.to_dict()})
                 except (ValueError, TypeError) as e:
+                    print(f"[http] 创建下载任务参数错误: {e}")
                     _send_json(self, 400, {"ok": False, "error": str(e)})
                 except Exception as e:
+                    print(f"[http] 创建下载任务失败: {e}")
                     _send_json(self, 502, {"ok": False, "error": str(e)})
                 return
             if req_path == "/api/downloads/settings":
+                print(f"[http] POST {req_path} client={self.client_address[0]}")
                 try:
                     body = _read_json_body(self)
-                    mc = int(body.get("max_concurrent", 3))
-                    v = download_mgr.set_max_concurrent(mc)
-                    _send_json(self, 200, {"ok": True, "max_concurrent": v})
-                except Exception as e:
+                    if "max_concurrent" not in body and "auto_parse_after_download" not in body:
+                        _send_json(
+                            self,
+                            400,
+                            {"ok": False, "error": "请提供 max_concurrent 或 auto_parse_after_download"},
+                        )
+                        return
+                    if "max_concurrent" in body:
+                        mc = int(body["max_concurrent"])
+                        download_mgr.set_max_concurrent(mc)
+                        print(f"[http] 下载并发上限已设为 max_concurrent={download_mgr.get_max_concurrent()}")
+                    if "auto_parse_after_download" in body:
+                        download_mgr.set_auto_parse_after_download(bool(body["auto_parse_after_download"]))
+                    _send_json(
+                        self,
+                        200,
+                        {
+                            "ok": True,
+                            "max_concurrent": download_mgr.get_max_concurrent(),
+                            "auto_parse_after_download": download_mgr.get_auto_parse_after_download(),
+                        },
+                    )
+                except (ValueError, TypeError) as e:
+                    print(f"[http] 下载设置参数错误: {e}")
                     _send_json(self, 400, {"ok": False, "error": str(e)})
+                except Exception as e:
+                    print(f"[http] 下载设置失败: {e}")
+                    _send_json(self, 502, {"ok": False, "error": str(e)})
                 return
             sub = req_path.removeprefix("/api/downloads/").strip("/")
             if sub:
@@ -2459,53 +3463,99 @@ def run_server(host: str, port: int, payload: dict[str, Any], dem_path: Path, op
                 tid = parts[0]
                 action = parts[1] if len(parts) > 1 else None
                 if action == "pause":
+                    print(f"[http] POST /api/downloads/{tid}/pause client={self.client_address[0]}")
                     try:
                         download_mgr.pause(tid)
+                        print(f"[http] 任务已暂停 id={tid}")
                         _send_json(self, 200, {"ok": True})
                     except KeyError:
+                        print(f"[http] pause 任务不存在 id={tid}")
                         _send_json(self, 404, {"ok": False, "error": "任务不存在"})
                     return
                 if action == "resume":
+                    print(f"[http] POST /api/downloads/{tid}/resume client={self.client_address[0]}")
                     try:
                         download_mgr.resume(tid)
+                        print(f"[http] 任务已继续 id={tid}")
                         _send_json(self, 200, {"ok": True})
                     except KeyError:
+                        print(f"[http] resume 任务不存在 id={tid}")
                         _send_json(self, 404, {"ok": False, "error": "任务不存在"})
                     return
-                if action == "load":
+                if action == "process":
+                    print(f"[http] POST /api/downloads/{tid}/process client={self.client_address[0]}")
                     try:
-                        with lock:
-                            tasks = {t["id"]: t for t in download_mgr.list_tasks()}
-                            info = tasks.get(tid)
-                            if not info or not info.get("output_dem_path"):
-                                _send_json(self, 400, {"ok": False, "error": "任务未完成或无文件"})
-                                return
-                            dem_file = Path(info["output_dem_path"])
-                            fps = int(ctx["payload"].get("playback_fps", 30) or 30)
-                            new_payload, new_dem = build_gui_payload(dem_file, playback_fps=fps)
-                            ctx["payload"] = new_payload
-                            ctx["dem_path"] = new_dem.resolve()
-                        _send_json(
-                            self,
-                            200,
-                            {"ok": True, "dem_path": str(ctx["dem_path"]), "match_id": new_payload["match_id"]},
-                        )
+                        dem_file = _read_task_dem_path(tid, only_completed=True)
+                        out = _enqueue_process_replay(dem_file)
+                        print(f"[http] 任务 process 入队 id={tid} dem={dem_file} out={out}")
+                        _send_json(self, 200, {"ok": True, **out})
+                    except ValueError as e:
+                        _send_json(self, 400, {"ok": False, "error": str(e)})
+                    except FileNotFoundError as e:
+                        _send_json(self, 404, {"ok": False, "error": str(e)})
                     except Exception as e:
+                        print(f"[http] 任务 process 失败 id={tid}: {e}")
+                        _send_json(self, 502, {"ok": False, "error": str(e)})
+                    return
+                if action == "play":
+                    print(f"[http] POST /api/downloads/{tid}/play client={self.client_address[0]}")
+                    try:
+                        dem_file = _read_task_dem_path(tid, only_completed=False)
+                        dem_out, match_id = _switch_replay_session(dem_file, allow_parse=False)
+                        print(f"[http] 任务 play 成功 id={tid} match_id={match_id} dem={dem_out}")
+                        _send_json(self, 200, {"ok": True, "dem_path": dem_out, "match_id": match_id})
+                    except ValueError as e:
+                        _send_json(self, 400, {"ok": False, "error": str(e)})
+                    except FileNotFoundError as e:
+                        _send_json(self, 404, {"ok": False, "error": str(e)})
+                    except ReplayCacheMissingError as e:
+                        print(f"[http] 任务 play 无可用缓存 id={tid}: {e}")
+                        _send_json(self, 400, {"ok": False, "error": str(e)})
+                    except Exception as e:
+                        print(f"[http] 任务 play 失败 id={tid}: {e}")
+                        _send_json(self, 502, {"ok": False, "error": str(e)})
+                    return
+                if action == "load":
+                    print(f"[http] POST /api/downloads/{tid}/load client={self.client_address[0]}")
+                    try:
+                        dem_file = _read_task_dem_path(tid, only_completed=False)
+                        dem_out, match_id = _switch_replay_session(dem_file, allow_parse=False)
+                        print(f"[http] 任务 load 成功 id={tid} match_id={match_id} dem={dem_out}")
+                        _send_json(self, 200, {"ok": True, "dem_path": dem_out, "match_id": match_id})
+                    except ValueError as e:
+                        _send_json(self, 400, {"ok": False, "error": str(e)})
+                    except FileNotFoundError as e:
+                        _send_json(self, 404, {"ok": False, "error": str(e)})
+                    except ReplayCacheMissingError as e:
+                        print(f"[http] 任务 load 无可用缓存 id={tid}: {e}")
+                        _send_json(self, 400, {"ok": False, "error": str(e)})
+                    except Exception as e:
+                        print(f"[http] 任务 load 失败 id={tid}: {e}")
                         _send_json(self, 502, {"ok": False, "error": str(e)})
                     return
             if self.path == "/clear_cache":
+                print(f"[http] POST /clear_cache client={self.client_address[0]}")
                 with lock:
                     dp = ctx["dem_path"]
-                    deleted = delete_replay_cache(dp)
-                    if deleted:
-                        ctx["payload"]["cache_hit"] = False
-                    body = json.dumps(
-                        {
-                            "deleted": bool(deleted),
-                            "cache_path": str(cache_path_for_dem(dp)),
-                        },
-                        ensure_ascii=False,
-                    ).encode("utf-8")
+                    if not dp.is_file():
+                        print(f"[http] clear_cache 跳过: 当前 dem 不是有效文件 path={dp}")
+                        body = json.dumps(
+                            {"deleted": False, "cache_path": "", "reason": "无当前录像文件"},
+                            ensure_ascii=False,
+                        ).encode("utf-8")
+                    else:
+                        deleted = delete_replay_cache(dp)
+                        if deleted:
+                            ctx["payload"]["cache_hit"] = False
+                        cp = str(cache_path_for_dem(dp))
+                        print(f"[http] clear_cache 结果 deleted={bool(deleted)} dem={dp} cache_path={cp}")
+                        body = json.dumps(
+                            {
+                                "deleted": bool(deleted),
+                                "cache_path": cp,
+                            },
+                            ensure_ascii=False,
+                        ).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
@@ -2528,15 +3578,32 @@ def run_server(host: str, port: int, payload: dict[str, Any], dem_path: Path, op
                 self.end_headers()
                 return
             try:
+                print(f"[http] PATCH {req_path} client={self.client_address[0]}")
                 body = _read_json_body(self)
-                stem = body.get("display_stem") or body.get("name")
-                if not isinstance(stem, str):
-                    raise ValueError("缺少 display_stem")
-                download_mgr.update_display_stem(tid, stem)
+                did = False
+                if "user_remark" in body:
+                    remark = body["user_remark"]
+                    if not isinstance(remark, str):
+                        raise ValueError("user_remark 必须是字符串")
+                    with remarks_lock:
+                        user_remarks["by_task"][tid] = remark.strip()[:2000]
+                        _save_user_remarks(user_remarks)
+                    did = True
+                if "display_stem" in body or "name" in body:
+                    stem = body.get("display_stem") or body.get("name")
+                    if not isinstance(stem, str):
+                        raise ValueError("display_stem 必须是字符串")
+                    download_mgr.update_display_stem(tid, stem)
+                    print(f"[http] 任务重命名 id={tid} stem={stem!r}")
+                    did = True
+                if not did:
+                    raise ValueError("请提供 user_remark 或 display_stem")
                 _send_json(self, 200, {"ok": True})
             except KeyError:
+                print(f"[http] PATCH 任务不存在 id={tid}")
                 _send_json(self, 404, {"ok": False, "error": "任务不存在"})
             except Exception as e:
+                print(f"[http] PATCH 失败 id={tid}: {e}")
                 _send_json(self, 400, {"ok": False, "error": str(e)})
 
         def do_DELETE(self) -> None:  # noqa: N802
@@ -2552,40 +3619,86 @@ def run_server(host: str, port: int, payload: dict[str, Any], dem_path: Path, op
                 self.end_headers()
                 return
             try:
+                print(f"[http] DELETE /api/downloads/{tid} client={self.client_address[0]}")
                 download_mgr.delete_task(tid)
+                print(f"[http] 任务已删除 id={tid}")
                 _send_json(self, 200, {"ok": True})
             except KeyError:
+                print(f"[http] DELETE 任务不存在 id={tid}")
                 _send_json(self, 404, {"ok": False, "error": "任务不存在"})
 
         def log_message(self, format_str: str, *args: Any) -> None:
             return
 
-    server = ThreadingHTTPServer((host, port), Handler)
+    print(f"[boot] run_server：正在绑定 TCP {host}:{port} … ({_boot_ms(t_rs):.0f}ms)")
+    try:
+        server = ThreadingHTTPServer((host, port), Handler)
+    except OSError as e:
+        print(f"[boot] run_server：绑定失败 {host}:{port} → {e}")
+        raise
     url = f"http://{host}:{port}/"
+    print(f"[boot] run_server：HTTP 监听已就绪 {url}（自 run_server 起 {_boot_ms(t_rs):.0f}ms）")
     print(f"[done] GUI 地址: {url}")
     if open_browser:
+        print("[boot] run_server：正在请求系统默认浏览器打开页面 …")
         webbrowser.open(url)
+    print(f"[boot] run_server：进入 serve_forever，服务已对外可用（{_boot_ms(t_rs):.0f}ms，Ctrl+C 退出）")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        pass
+        print("[boot] 收到 KeyboardInterrupt，正在退出 serve_forever …")
     finally:
         server.server_close()
+        print("[boot] HTTP server 已关闭")
 
 
 def main() -> None:
+    t0 = time.perf_counter()
+    print(f"[boot] DotaSimpleReplay 启动 pid={os.getpid()} argv={sys.argv!r}")
     args = parse_args()
-    replay_path = resolve_input_path(args.input_replay)
-    payload, dem_path = build_gui_payload(replay_path, playback_fps=args.fps)
+    print(
+        f"[boot] 参数解析完成 (+{_boot_ms(t0):.0f}ms) host={args.host!r} port={args.port} fps={args.fps} "
+        f"export_json={args.export_json!r} no_server={args.no_server} no_open_browser={args.no_open_browser} "
+        f"input_replay={args.input_replay!r}"
+    )
+    launch_payload: tuple[dict[str, Any], Path] | None = None
 
     if args.export_json:
+        print(f"[boot] 开始 export-json 流程 → {args.export_json!r} (+{_boot_ms(t0):.0f}ms)")
+        print("[boot] 解析输入回放路径（resolve_input_path）…")
+        replay_path = resolve_input_path(args.input_replay)
+        print(f"[boot] 输入路径: {replay_path} (+{_boot_ms(t0):.0f}ms)")
+        print("[boot] 正在 build_gui_payload（可能较久）…")
+        payload, dem_path = build_gui_payload(replay_path, playback_fps=args.fps)
+        print(f"[boot] build_gui_payload 完成 match_id={payload.get('match_id')} (+{_boot_ms(t0):.0f}ms)")
         out = Path(args.export_json).expanduser().resolve()
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"[done] 已导出 GUI 数据: {out}")
+        print(f"[done] 已导出 GUI 数据: {out} (+{_boot_ms(t0):.0f}ms)")
+        if not args.no_server:
+            launch_payload = (payload, dem_path)
+            print(f"[boot] 将在同一解析结果上启动 Web（+{_boot_ms(t0):.0f}ms）")
 
     if args.no_server:
+        print(f"[boot] --no_server：将不启动 Web (+{_boot_ms(t0):.0f}ms)")
+        if not args.export_json:
+            print("[boot] 仅解析模式：resolve_input_path …")
+            replay_path = resolve_input_path(args.input_replay)
+            print(f"[boot] 仅解析模式：build_gui_payload … path={replay_path}")
+            build_gui_payload(replay_path, playback_fps=args.fps)
+            print(f"[boot] 仅解析模式结束 (+{_boot_ms(t0):.0f}ms)")
         return
+
+    if launch_payload is not None:
+        payload, dem_path = launch_payload
+        print(f"[boot] 将被加载的录像（export-json 已解析）: dem={dem_path}")
+        print(f"[info] 使用 export-json 解析结果启动 Web dem={dem_path}")
+    else:
+        print(f"[boot] 调用 prepare_web_gui_session（快速路径，不解析 DEM）(+{_boot_ms(t0):.0f}ms)")
+        payload, dem_path, _ = prepare_web_gui_session(args)
+        print(f"[info] 常规 Web 启动 dem={dem_path} session_ready={payload.get('session_ready', True)}")
+
+    print(f"[boot] 即将进入 run_server（累计 +{_boot_ms(t0):.0f}ms）")
     run_server(args.host, args.port, payload, dem_path, open_browser=not args.no_open_browser)
 
 

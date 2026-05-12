@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 
-CACHE_VERSION = 3
+CACHE_VERSION = 4
 CACHE_DIRNAME = ".replay_cache"
 
 
