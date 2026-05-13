@@ -54,6 +54,17 @@ def norm_dem_storage_key(path_obj: Path) -> str:
         return str(path_obj).replace("\\", "/").lower()
 
 
+def _queue_key_for_replay(replay_path: Path) -> str:
+    """解析队列入队去重用的规范化键；与 ensure_dem_path 后的 .dem 路径键一致，且不解压 .bz2。"""
+    try:
+        p = replay_path.expanduser().resolve()
+    except OSError:
+        p = replay_path
+    if p.suffix.lower() == ".bz2":
+        return norm_dem_storage_key(p.with_suffix(""))
+    return norm_dem_storage_key(p)
+
+
 def _load_user_remarks() -> dict[str, dict[str, str]]:
     out: dict[str, dict[str, str]] = {"by_path": {}, "by_task": {}}
     try:
@@ -3443,8 +3454,7 @@ def run_server(host: str, port: int, payload: dict[str, Any], dem_path: Path, op
             "queued_paths": queued_paths,
         }
 
-    def parse_progress_cb_for_replay(replay_p: Path) -> Callable[[int, int], None]:
-        dem_ref = ensure_dem_path(replay_p)
+    def parse_progress_cb_for_replay(dem_ref: Path) -> Callable[[int, int], None]:
         key = norm_dem_storage_key(dem_ref)
         last_log_bucket = [-1]
 
@@ -3468,14 +3478,17 @@ def run_server(host: str, port: int, payload: dict[str, Any], dem_path: Path, op
         return cb
 
     def enqueue_parse_request(replay_path: Path) -> dict[str, Any]:
-        dem_ref = ensure_dem_path(replay_path)
-        key = norm_dem_storage_key(dem_ref)
+        try:
+            raw = replay_path.expanduser().resolve()
+        except OSError:
+            raw = replay_path
+        key = _queue_key_for_replay(raw)
         with parse_q_lock:
             if bool(parse_progress["active"]) and parse_progress["dem_path"] == key:
                 return {"ok": True, "queued": False, "duplicate": True}
             if key in parse_q_set:
                 return {"ok": True, "queued": False, "duplicate": True}
-            parse_deque.append((dem_ref, key))
+            parse_deque.append((raw, key))
             parse_q_set.add(key)
             parse_q_cv.notify()
         return {"ok": True, "queued": True, "duplicate": False}
@@ -3515,10 +3528,16 @@ def run_server(host: str, port: int, payload: dict[str, Any], dem_path: Path, op
                 parse_progress["active"] = True
                 parse_progress["dem_path"] = key
                 parse_progress["pct"] = 0.0
-            pc = parse_progress_cb_for_replay(dem_item)
+            dem_ref = ensure_dem_path(dem_item)
+            key_live = norm_dem_storage_key(dem_ref)
+            if key_live != key:
+                with parse_q_lock:
+                    parse_progress["dem_path"] = key_live
+                print(f"[web] 解析队列键校正 queue={key!r} live={key_live!r}")
+            pc = parse_progress_cb_for_replay(dem_ref)
             try:
                 build_gui_payload(
-                    dem_item,
+                    dem_ref,
                     playback_fps=_current_fps(),
                     parse_progress_cb=pc,
                     allow_parse=True,
