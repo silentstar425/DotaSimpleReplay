@@ -73,6 +73,13 @@ def classify_world_entity(npc_name: str, class_name: str) -> tuple[str, str] | N
         return None
     if cls.startswith("cdota_modifier_") or "_modifier_" in cls:
         return None
+
+    # 插在地上的假眼 / 真眼（CDOTA_NPC_Observer_Ward*，不走 cdota_basenpc 前缀）
+    if cls.startswith("cdota_npc_observer_ward"):
+        if "truesight" in cls:
+            return ("ward", "sentry")
+        return ("ward", "observer")
+
     if (
         not cls.startswith("cdota_basenpc")
         and not cls.startswith("cdota_unit_")
@@ -118,7 +125,7 @@ def classify_world_entity(npc_name: str, class_name: str) -> tuple[str, str] | N
 
 def _classification_score(category: str, subtype: str) -> int:
     score = 0
-    if category in {"building", "creep", "lotus_pool", "roshan", "tormentor"}:
+    if category in {"building", "creep", "lotus_pool", "roshan", "tormentor", "ward"}:
         score += 10
     if subtype not in {"other", ""}:
         score += 5
