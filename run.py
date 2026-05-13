@@ -8,7 +8,7 @@
 3) 右侧英雄状态（血量/蓝量、复活倒计时）
 4) 英雄死亡时不在地图上绘制图标
 5) 播放刷新率（FPS）默认 30，可调
-6) Web 界面「下载管理」：下载任务与本机录像合并为一张表、单线程解析队列、备注列与解析进度
+6) Web 界面「录像管理」：下载任务与本机录像合并为一张表、单线程解析队列、备注列与解析进度
 """
 
 from __future__ import annotations
@@ -31,11 +31,13 @@ import gem
 from gem.extractors.players import PlayerExtractor
 from gem.parser import ReplayParser
 from replay_cache import cache_path_for_dem, delete_replay_cache, load_replay_cache, save_replay_cache
+from replay_asset_registry import purge_local_replay_dem_file
 from replay_download_io import (
+    extract_replays_bz2_archives,
     is_replay_library_path,
     iter_default_replay_candidates,
-    legacy_replay_samples_dir,
     list_stored_dem_files,
+    migrate_legacy_replay_samples_to_replays,
     replay_storage_root,
 )
 from replay_download_manager import DownloadTaskManager
@@ -148,15 +150,68 @@ HTML_TEMPLATE = """<!doctype html>
       flex: 1;
       min-width: 280px;
     }
-    .speed-indicator {
-      font-size: 12px;
-      color: #cfe4ff;
-      min-width: 44px;
-      text-align: center;
-    }
     #visionTeamSelect {
       width: 110px;
       padding: 6px 8px;
+    }
+    .feature-toggle-wrap {
+      display: inline-flex;
+      align-items: stretch;
+      border-radius: 6px;
+      overflow: hidden;
+      border: 1px solid #2f3946;
+      box-sizing: border-box;
+      background: #3a4d63;
+    }
+    .feature-toggle-wrap.on {
+      background: #2d6cdf;
+    }
+    .feature-toggle-main,
+    .feature-toggle-settings {
+      background: transparent !important;
+      color: #fff;
+      border: none;
+      border-radius: 0;
+      cursor: pointer;
+    }
+    .feature-toggle-main {
+      padding: 7px 12px;
+      min-width: 56px;
+    }
+    .feature-toggle-settings {
+      width: 36px;
+      flex: 0 0 36px;
+      border-left: 1px solid rgba(0, 0, 0, 0.2);
+      padding: 0;
+      font-size: 17px;
+      line-height: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: rgba(255, 255, 255, 0.95);
+    }
+    .feature-toggle-wrap:not(.on) .feature-toggle-main:hover,
+    .feature-toggle-wrap:not(.on) .feature-toggle-settings:hover {
+      background: rgba(255, 255, 255, 0.1) !important;
+    }
+    .feature-toggle-wrap.on .feature-toggle-main:hover,
+    .feature-toggle-wrap.on .feature-toggle-settings:hover {
+      background: rgba(255, 255, 255, 0.12) !important;
+    }
+    button.feature-toggle-vision {
+      background: #3a4d63 !important;
+      border-radius: 5px;
+      min-width: 56px;
+      padding: 7px 12px;
+    }
+    button.feature-toggle-vision.on {
+      background: #2d6cdf !important;
+    }
+    button.feature-toggle-vision:not(.on):hover {
+      background: #445a75 !important;
+    }
+    button.feature-toggle-vision.on:hover {
+      background: #3a77e7 !important;
     }
     button {
       background: #2d6cdf;
@@ -311,6 +366,14 @@ HTML_TEMPLATE = """<!doctype html>
       min-height: 200px;
       max-height: min(58vh, 680px);
     }
+    .dl-table .col-check {
+      width: 34px;
+      text-align: center;
+      vertical-align: middle;
+    }
+    .dl-table .col-check input {
+      cursor: pointer;
+    }
     .dl-table {
       width: 100%;
       border-collapse: collapse;
@@ -343,6 +406,12 @@ HTML_TEMPLATE = """<!doctype html>
     }
     .dl-table .dl-actions-cell { white-space: nowrap; }
     .dl-table .dl-actions-cell button { padding: 3px 8px; font-size: 11px; margin-right: 4px; }
+    .dl-table .dl-actions-cell button.btn-replay-playing:disabled {
+      background: #4a5563;
+      color: #aeb8c4;
+      cursor: not-allowed;
+      opacity: 0.92;
+    }
     .dl-pager {
       display: flex;
       align-items: center;
@@ -376,13 +445,16 @@ HTML_TEMPLATE = """<!doctype html>
       <div class="meta" id="tickLine"></div>
       <div class="controls">
         <div class="control-row">
-          <button id="openDownloadManagerBtn" style="background:#1a7f37;">下载管理</button>
-          <button id="clearCacheBtn" style="background:#8b1e2d;">清理缓存</button>
-          <button id="toggleTrailBtn" style="background:#3a4d63;">轨迹：关</button>
-          <button id="openTrailSettingsBtn" style="background:#3a4d63;">轨迹设置</button>
-          <button id="toggleHeatmapBtn" style="background:#3a4d63;">热力图：关</button>
-          <button id="openHeatmapSettingsBtn" style="background:#3a4d63;">热力图设置</button>
-          <button id="toggleVisionBtn" style="background:#3a4d63;">视野：关</button>
+          <button id="openDownloadManagerBtn" style="background:#1a7f37;">录像管理</button>
+          <div class="feature-toggle-wrap">
+            <button type="button" id="toggleTrailBtn" class="feature-toggle-main" title="开关英雄轨迹">轨迹</button>
+            <button type="button" id="openTrailSettingsBtn" class="feature-toggle-settings" title="轨迹设置" aria-label="轨迹设置">⚙</button>
+          </div>
+          <div class="feature-toggle-wrap">
+            <button type="button" id="toggleHeatmapBtn" class="feature-toggle-main" title="开关热力图">热力图</button>
+            <button type="button" id="openHeatmapSettingsBtn" class="feature-toggle-settings" title="热力图设置" aria-label="热力图设置">⚙</button>
+          </div>
+          <button type="button" id="toggleVisionBtn" class="feature-toggle-vision" title="开关战争迷雾视野">视野</button>
           <select id="visionTeamSelect">
             <option value="both">双方视野</option>
             <option value="team1">阵营1视野</option>
@@ -394,9 +466,8 @@ HTML_TEMPLATE = """<!doctype html>
           <button id="seekBack10Btn" style="background:#3a4d63;">后退10秒</button>
           <button id="seekForward10Btn" style="background:#3a4d63;">前进10秒</button>
           <button id="speedHalfBtn" style="background:#3a4d63;">0.5x</button>
-          <button id="speedNormalBtn" type="button" style="background:#2d6cdf;" title="恢复为原速（1 倍）">原速</button>
+          <button id="speedNormalBtn" type="button" style="background:#2d6cdf;" title="1 倍速">1x</button>
           <button id="speedDoubleBtn" style="background:#3a4d63;">2x</button>
-          <span id="speedIndicator" class="speed-indicator">1x</span>
           <div class="slider-wrap">
             <input id="slider" type="range" min="0" max="1" step="1" value="0" />
             <label for="fpsInput" class="small-muted">刷新率(FPS)</label>
@@ -443,7 +514,7 @@ HTML_TEMPLATE = """<!doctype html>
   <div id="downloadManagerModal" class="settings-modal">
     <div class="settings-body download-manager-body" style="width: min(920px, 96vw); max-height: 88vh;">
       <div class="settings-title">
-        <span>录像下载</span>
+        <span>录像管理</span>
         <button type="button" id="downloadManagerCloseBtn" class="btn-secondary">关闭</button>
       </div>
       <div class="control-row" style="margin-bottom: 10px;">
@@ -455,16 +526,16 @@ HTML_TEMPLATE = """<!doctype html>
           <option value="4">4</option>
           <option value="5">5</option>
         </select>
-        <label class="small-muted" style="margin-left:10px;display:inline-flex;align-items:center;gap:6px;cursor:pointer;">
-          <input type="checkbox" id="autoParseAfterDownloadCheckbox" />
-          下载后自动解析
-        </label>
         <button type="button" id="openNewDownloadModalBtn" style="background:#2d6cdf;">新建下载</button>
         <label for="downloadSearchInput" class="small-muted" style="margin-left:8px;">检索</label>
-        <input id="downloadSearchInput" type="search" placeholder="比赛编号、文件名或备注" style="flex:1;min-width:140px;" />
+        <input id="downloadSearchInput" type="search" placeholder="录像id、文件名或备注" style="flex:1;min-width:140px;" />
       </div>
       <div id="downloadStorageHint" class="small-muted" style="margin-bottom:4px;line-height:1.35;"></div>
-      <div class="small-muted" style="margin-bottom:4px;">录像</div>
+      <div class="control-row" style="margin-bottom:8px;flex-wrap:wrap;align-items:center;">
+        <button type="button" id="batchProcessReplaysBtn" class="btn-secondary">批量处理</button>
+        <button type="button" id="batchClearCacheReplaysBtn" class="btn-secondary">批量清除缓存</button>
+        <span class="small-muted">勾选左侧复选框；「批量处理」仅对选中项中尚未解析的录像入队。</span>
+      </div>
       <div id="replayManagerList" class="scroll replay-manager-scroll" style="margin-bottom: 2px;"></div>
       <div id="replayManagerPager" class="dl-pager"></div>
     </div>
@@ -476,12 +547,33 @@ HTML_TEMPLATE = """<!doctype html>
         <button type="button" id="newDownloadModalCloseBtn" class="btn-secondary">关闭</button>
       </div>
       <div class="settings-grid" style="margin-bottom: 12px; grid-template-columns: minmax(0, 1fr);">
-        <label for="modalNewMatchIdInput">比赛编号</label>
+        <label for="modalNewMatchIdInput">录像id</label>
         <input id="modalNewMatchIdInput" type="text" inputmode="numeric" placeholder="例如 8781301871" />
       </div>
+      <label class="small-muted" style="margin:0 0 12px 0;display:flex;align-items:center;gap:8px;cursor:pointer;">
+        <input type="checkbox" id="autoParseAfterDownloadCheckbox" />
+        下载后自动解析
+      </label>
       <div class="settings-actions">
         <button type="button" id="cancelNewDownloadBtn" class="btn-secondary">取消</button>
         <button type="button" id="confirmNewDownloadBtn">开始下载</button>
+      </div>
+    </div>
+  </div>
+  <div id="clearReplayCacheModal" class="settings-modal sub-modal">
+    <div class="settings-body" style="width: min(440px, 92vw);">
+      <div class="settings-title">
+        <span>清除解析缓存</span>
+        <button type="button" id="clearReplayCacheModalCloseBtn" class="btn-secondary">关闭</button>
+      </div>
+      <p class="small-muted" style="margin:0 0 12px 0;line-height:1.45;">将删除选中项的本地解析缓存（.replay_cache）。默认保留磁盘上的 .dem 录像文件。</p>
+      <label class="settings-hero-item" style="margin-bottom:14px;">
+        <input type="checkbox" id="clearReplayCacheAlsoDeleteDemCheckbox" />
+        <span>同时删除录像文件</span>
+      </label>
+      <div class="settings-actions">
+        <button type="button" id="cancelClearReplayCacheBtn" class="btn-secondary">取消</button>
+        <button type="button" id="confirmClearReplayCacheBtn" style="background:#8b1e2d;">确定</button>
       </div>
     </div>
   </div>
@@ -731,7 +823,6 @@ HTML_TEMPLATE = """<!doctype html>
     const speedHalfBtn = document.getElementById("speedHalfBtn");
     const speedNormalBtn = document.getElementById("speedNormalBtn");
     const speedDoubleBtn = document.getElementById("speedDoubleBtn");
-    const speedIndicator = document.getElementById("speedIndicator");
     const slider = document.getElementById("slider");
     const openDownloadManagerBtn = document.getElementById("openDownloadManagerBtn");
     const downloadManagerModal = document.getElementById("downloadManagerModal");
@@ -748,7 +839,23 @@ HTML_TEMPLATE = """<!doctype html>
     const downloadStorageHint = document.getElementById("downloadStorageHint");
     const replayManagerList = document.getElementById("replayManagerList");
     const replayManagerPager = document.getElementById("replayManagerPager");
-    const clearCacheBtn = document.getElementById("clearCacheBtn");
+    const clearReplayCacheModal = document.getElementById("clearReplayCacheModal");
+    const clearReplayCacheModalCloseBtn = document.getElementById("clearReplayCacheModalCloseBtn");
+    const clearReplayCacheAlsoDeleteDemCheckbox = document.getElementById("clearReplayCacheAlsoDeleteDemCheckbox");
+    const cancelClearReplayCacheBtn = document.getElementById("cancelClearReplayCacheBtn");
+    const confirmClearReplayCacheBtn = document.getElementById("confirmClearReplayCacheBtn");
+    const batchProcessReplaysBtn = document.getElementById("batchProcessReplaysBtn");
+    const batchClearCacheReplaysBtn = document.getElementById("batchClearCacheReplaysBtn");
+    if (replayManagerList) {
+      replayManagerList.addEventListener("change", (e) => {
+        const t = e.target;
+        if (!t || t.id !== "replayCheckAllPage") return;
+        const on = t.checked;
+        replayManagerList.querySelectorAll(".replay-row-check:not(:disabled)").forEach((cb) => {
+          cb.checked = on;
+        });
+      });
+    }
     const toggleTrailBtn = document.getElementById("toggleTrailBtn");
     const openTrailSettingsBtn = document.getElementById("openTrailSettingsBtn");
     const toggleHeatmapBtn = document.getElementById("toggleHeatmapBtn");
@@ -822,6 +929,40 @@ HTML_TEMPLATE = """<!doctype html>
       dragging: false,
       lastX: 0.0,
       lastY: 0.0,
+    };
+    const clampMapViewPan = () => {
+      const W = canvas.width;
+      const H = canvas.height;
+      if (W <= 0 || H <= 0) return;
+      const cx = W / 2;
+      const cy = H / 2;
+      const z = mapView.zoom;
+      const L = mapFramePad;
+      const T = mapFramePad;
+      const R = W - mapFramePad;
+      const B = H - mapFramePad;
+      const tL = (L - cx) * z + cx;
+      const tR = (R - cx) * z + cx;
+      const tT = (T - cy) * z + cy;
+      const tB = (B - cy) * z + cy;
+      const minSx = Math.min(tL, tR);
+      const maxSx = Math.max(tL, tR);
+      const minSy = Math.min(tT, tB);
+      const maxSy = Math.max(tT, tB);
+      const minPanX = W - maxSx;
+      const maxPanX = -minSx;
+      if (minPanX <= maxPanX) {
+        mapView.panX = Math.min(maxPanX, Math.max(minPanX, mapView.panX));
+      } else {
+        mapView.panX = (W - minSx - maxSx) / 2;
+      }
+      const minPanY = H - maxSy;
+      const maxPanY = -minSy;
+      if (minPanY <= maxPanY) {
+        mapView.panY = Math.min(maxPanY, Math.max(minPanY, mapView.panY));
+      } else {
+        mapView.panY = (H - minSy - maxSy) / 2;
+      }
     };
     const visionSettings = {
       enabled: false,
@@ -1093,6 +1234,7 @@ HTML_TEMPLATE = """<!doctype html>
 
     const renderMap = (tick) => {
       resizeCanvasToMapAspect();
+      clampMapViewPan();
       ctx.fillStyle = "#111";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.save();
@@ -1130,13 +1272,6 @@ HTML_TEMPLATE = """<!doctype html>
         mapFramePad,
         canvas.width - 2 * mapFramePad,
         canvas.height - 2 * mapFramePad
-      );
-      ctx.fillStyle = "#ccc";
-      ctx.font = "14px Arial";
-      ctx.fillText(
-        mapBackgroundLoaded ? "地图（底图 + 归一化坐标）" : "地图（归一化坐标）",
-        mapFramePad + 10,
-        mapFramePad + 16
       );
       renderWorldEntities(tick);
       renderHeroHeatmap(tick);
@@ -1243,13 +1378,15 @@ HTML_TEMPLATE = """<!doctype html>
     };
 
     const updateTrailToggleText = () => {
-      toggleTrailBtn.textContent = `轨迹：${heroTrailSettings.enabled ? "开" : "关"}`;
+      const w = toggleTrailBtn && toggleTrailBtn.closest(".feature-toggle-wrap");
+      if (w) w.classList.toggle("on", heroTrailSettings.enabled);
     };
     const updateHeatmapToggleText = () => {
-      toggleHeatmapBtn.textContent = `热力图：${heatmapSettings.enabled ? "开" : "关"}`;
+      const w = toggleHeatmapBtn && toggleHeatmapBtn.closest(".feature-toggle-wrap");
+      if (w) w.classList.toggle("on", heatmapSettings.enabled);
     };
     const updateVisionToggleText = () => {
-      toggleVisionBtn.textContent = `视野：${visionSettings.enabled ? "开" : "关"}`;
+      toggleVisionBtn.classList.toggle("on", visionSettings.enabled);
       visionTeamSelect.disabled = !visionSettings.enabled;
     };
 
@@ -1371,11 +1508,12 @@ HTML_TEMPLATE = """<!doctype html>
     const applyLoadedPayload = () => {
       if (!data) return;
       if (data.session_ready === false) {
-        titleLine.textContent = "Dota2 回放可视化 · 请在下载管理中选择录像或处理缓存";
+        titleLine.textContent = "Dota2 回放可视化 · 请在录像管理中选择录像或处理缓存";
         slider.min = "0";
         slider.max = "0";
         slider.value = "0";
         stopPlayback();
+        if (downloadManagerModal.classList.contains("open")) renderDownloadTaskList();
         return;
       }
       titleLine.textContent = `Dota2 回放可视化 · match ${data.match_id}`;
@@ -1399,7 +1537,9 @@ HTML_TEMPLATE = """<!doctype html>
       mapView.zoom = 1.0;
       mapView.panX = 0.0;
       mapView.panY = 0.0;
+      clampMapViewPan();
       renderFromFloat(0);
+      if (downloadManagerModal.classList.contains("open")) renderDownloadTaskList();
     };
 
     const reloadDataFromServer = async () => {
@@ -1417,7 +1557,6 @@ HTML_TEMPLATE = """<!doctype html>
     };
 
     const updateSpeedUI = () => {
-      speedIndicator.textContent = `${playbackSpeed}x`;
       speedHalfBtn.style.background = playbackSpeed === 0.5 ? "#2d6cdf" : "#3a4d63";
       if (speedNormalBtn) speedNormalBtn.style.background = playbackSpeed === 1.0 ? "#2d6cdf" : "#3a4d63";
       speedDoubleBtn.style.background = playbackSpeed === 2.0 ? "#2d6cdf" : "#3a4d63";
@@ -1601,6 +1740,7 @@ HTML_TEMPLATE = """<!doctype html>
       mapView.panY += dy;
       mapView.lastX = e.clientX;
       mapView.lastY = e.clientY;
+      clampMapViewPan();
       if (data) render(currentTick);
     });
     canvas.addEventListener("wheel", (e) => {
@@ -1615,11 +1755,13 @@ HTML_TEMPLATE = """<!doctype html>
       const centerY = canvas.height / 2;
       mapView.panX = sx - (pre.x - centerX) * mapView.zoom - centerX;
       mapView.panY = sy - (pre.y - centerY) * mapView.zoom - centerY;
+      clampMapViewPan();
       if (data) render(currentTick);
     }, { passive: false });
     canvas.style.cursor = "grab";
 
     let downloadPollTimer = null;
+    let pendingReplayCacheClearItems = [];
     let lastDownloadPayload = {
       tasks: [],
       max_concurrent: 3,
@@ -1697,6 +1839,13 @@ HTML_TEMPLATE = """<!doctype html>
       return normDemPathKey(pathStr).replace(/\\.bz2$/i, "");
     }
 
+    function currentPlayingDemKey() {
+      if (!data || data.session_ready === false) return "";
+      const dp = data.dem_path;
+      if (dp == null || String(dp).trim() === "") return "";
+      return demKeyForParseProgress(String(dp));
+    }
+
     function parseQueuedPaths() {
       const pp = lastDownloadPayload.parse_progress || {};
       return Array.isArray(pp.queued_paths) ? pp.queued_paths : [];
@@ -1714,8 +1863,9 @@ HTML_TEMPLATE = """<!doctype html>
     }
 
     function localStatusText(row) {
-      const pp = lastDownloadPayload.parse_progress || {};
       const key = row.dem_norm_key || demKeyForParseProgress(String(row.path || ""));
+      if (key && key === currentPlayingDemKey()) return "播放中";
+      const pp = lastDownloadPayload.parse_progress || {};
       if (isParseActiveForKey(key)) return `处理中（${Math.round(Number(pp.pct) || 0)}%）`;
       if (isParseQueuedForKey(key)) return "队列中";
       if (row.playback_ready) return "可播放";
@@ -1733,6 +1883,7 @@ HTML_TEMPLATE = """<!doctype html>
       const pct = Math.min(100, Math.round((t.progress || 0) * 100));
       if (t.state === "completed") {
         const pk = t.dem_norm_key || (t.output_dem_path ? demKeyForParseProgress(String(t.output_dem_path)) : "");
+        if (pk && pk === currentPlayingDemKey()) return "播放中";
         if (!t.playback_ready && pk) {
           if (isParseActiveForKey(pk)) return `处理中（${Math.round(Number(pp.pct) || 0)}%）`;
           if (isParseQueuedForKey(pk)) return "队列中";
@@ -1825,6 +1976,60 @@ HTML_TEMPLATE = """<!doctype html>
       return items;
     }
 
+    function buildClearCacheItemFromReplayButton(btn) {
+      const k = btn.getAttribute("data-kind");
+      if (k === "task") {
+        const tid = btn.getAttribute("data-task-id");
+        if (!tid) return null;
+        return { kind: "task", task_id: tid };
+      }
+      if (k === "local") {
+        const enc = btn.getAttribute("data-local-path");
+        if (!enc) return null;
+        try {
+          return { kind: "local", path: decodeURIComponent(enc) };
+        } catch (e) {
+          return null;
+        }
+      }
+      return null;
+    }
+
+    function openReplayClearCacheModal(items) {
+      const arr = (items || []).filter(Boolean);
+      if (!arr.length) return;
+      pendingReplayCacheClearItems = arr;
+      if (clearReplayCacheAlsoDeleteDemCheckbox) clearReplayCacheAlsoDeleteDemCheckbox.checked = false;
+      if (clearReplayCacheModal) clearReplayCacheModal.classList.add("open");
+    }
+
+    function closeReplayClearCacheModal() {
+      if (clearReplayCacheModal) clearReplayCacheModal.classList.remove("open");
+      pendingReplayCacheClearItems = [];
+    }
+
+    function collectReplayManagerCheckedItems() {
+      if (!replayManagerList) return [];
+      const out = [];
+      replayManagerList.querySelectorAll(".replay-row-check:checked").forEach((cb) => {
+        const k = cb.getAttribute("data-kind");
+        if (k === "task") {
+          const tid = cb.getAttribute("data-task-id");
+          if (tid) out.push({ kind: "task", task_id: tid });
+        } else if (k === "local") {
+          const enc = cb.getAttribute("data-path-enc");
+          if (enc) {
+            try {
+              out.push({ kind: "local", path: decodeURIComponent(enc) });
+            } catch (e) {
+              /* ignore */
+            }
+          }
+        }
+      });
+      return out;
+    }
+
     function renderPagerBar(page, total, pageSize) {
       if (!replayManagerPager) return;
       if (total === 0) {
@@ -1855,8 +2060,7 @@ HTML_TEMPLATE = """<!doctype html>
       const roots = lastDownloadPayload.storage_roots || {};
       if (downloadStorageHint) {
         const rp = roots.replays || "";
-        const leg = roots.replay_samples || "";
-        downloadStorageHint.textContent = rp ? `录像目录 replays：${rp} · 兼容 replay_samples：${leg}` : "";
+        downloadStorageHint.textContent = rp ? `录像目录 replays：${rp}` : "";
       }
       if (!replayManagerList) return;
 
@@ -1878,7 +2082,7 @@ HTML_TEMPLATE = """<!doctype html>
 
       if (allTasks.length === 0 && allLocals.length === 0) {
         replayManagerList.innerHTML =
-          '<div class="small-muted">暂无录像。点击「新建下载」添加下载任务；本机 replays/ 与 replay_samples/ 中的文件也会显示在此。</div>';
+          '<div class="small-muted">暂无录像。点击「新建下载」添加下载任务；本机 replays/ 下的 .dem 也会显示在此。</div>';
         if (replayManagerPager) replayManagerPager.innerHTML = "";
         replayManagerPage = 1;
         return;
@@ -1901,22 +2105,32 @@ HTML_TEMPLATE = """<!doctype html>
             const t = item.task;
             const metaTip = taskRemarkMeta(t);
             const titleAttr = metaTip ? ` title="${dlAttrEsc(metaTip)}"` : "";
-            const mid = `#${t.match_id}`;
-            const folder = "replays";
+            const vid = String(t.match_id ?? "");
+            const chkDis =
+              t.state !== "completed" || !t.output_dem_path
+                ? ` disabled title=\"仅已完成且有录像文件的任务可参与批量清除缓存\"`
+                : "";
+            const chk = `<td class="col-check"><input type="checkbox" class="replay-row-check" data-kind="task" data-task-id="${t.id}"${chkDis} /></td>`;
             const sz =
               t.output_size != null && Number.isFinite(Number(t.output_size))
                 ? formatDlBytes(t.output_size)
                 : "—";
             const timeCol = truncateToMinute(t.download_started_at || t.created_at || "");
             const st = taskStatusText(t);
-            const fileName = dlAttrEsc(String(t.display_stem || t.match_id || ""));
             const uraw = String(t.user_remark || "");
             const ur = dlAttrEsc(uraw);
             const pk = t.dem_norm_key || (t.output_dem_path ? demKeyForParseProgress(String(t.output_dem_path)) : "");
             const inParse = Boolean(pk && (isParseActiveForKey(pk) || isParseQueuedForKey(pk)));
-            let actions = `<button type="button" class="btn-dl-delete" data-task-id="${t.id}" style="background:#8b1e2d;">删除</button>`;
+            const isPlaying = Boolean(pk && pk === currentPlayingDemKey());
+            const tail =
+              t.state === "completed"
+                ? `<button type="button" class="btn-replay-clear-cache" data-kind="task" data-task-id="${t.id}" style="background:#8b1e2d;">清除缓存</button>`
+                : `<button type="button" class="btn-dl-delete" data-task-id="${t.id}" style="background:#8b1e2d;">删除任务</button>`;
+            let actions = tail;
             if (t.state === "completed") {
-              if (t.playback_ready) {
+              if (isPlaying) {
+                actions = `<button type="button" class="btn-dl-play btn-replay-playing" data-task-id="${t.id}" disabled title="当前正在播放">播放</button>${actions}`;
+              } else if (t.playback_ready) {
                 actions = `<button type="button" class="btn-dl-play" data-task-id="${t.id}" style="background:#1a7f37;">播放</button>${actions}`;
               } else if (inParse) {
                 actions = `<button type="button" class="btn-parse-cancel" data-dem-key="${dlAttrEsc(pk)}" data-task-id="${t.id}" style="background:#8a5a2b;">取消</button>${actions}`;
@@ -1924,35 +2138,35 @@ HTML_TEMPLATE = """<!doctype html>
                 actions = `<button type="button" class="btn-dl-process" data-task-id="${t.id}" style="background:#6b4dbf;">处理</button>${actions}`;
               }
             } else {
-              const canPause = ["running", "waiting_slot", "queued"].includes(t.state);
-              const canResume = t.state === "paused";
-              actions = `<button type="button" class="btn-dl-pause" data-task-id="${t.id}" ${canPause ? '' : 'disabled'}>暂停</button><button type="button" class="btn-dl-resume" data-task-id="${t.id}" ${canResume ? '' : 'disabled'}>继续</button>${actions}`;
+              actions = tail;
             }
             return `<tr data-merged-idx="${gIdx}"${titleAttr}>
-              <td>${fileName}</td>
-              <td class="small-muted">${folder}</td>
-              <td>${mid}</td>
+              ${chk}
+              <td>${dlAttrEsc(vid)}</td>
               <td>${sz}</td>
               <td class="small-muted">${dlAttrEsc(timeCol)}</td>
               <td>${dlAttrEsc(st)}</td>
-              <td class="dl-remark-cell"><span title="${ur}">${uraw ? ur : "—"}</span> <button type="button" class="btn-secondary btn-remark-task" data-task-id="${t.id}" style="padding:3px 8px;font-size:11px;">编辑</button></td>
               <td class="dl-actions-cell">${actions}</td>
+              <td class="dl-remark-cell"><span title="${ur}">${uraw ? ur : "—"}</span> <button type="button" class="btn-secondary btn-remark-task" data-task-id="${t.id}" style="padding:3px 8px;font-size:11px;">编辑</button></td>
             </tr>`;
           }
           const row = item.local;
-          const mid = row.match_id_hint != null && row.match_id_hint !== undefined ? `#${row.match_id_hint}` : "—";
-          const folder = dlAttrEsc(String(row.folder || ""));
-          const name = dlAttrEsc(String(row.name || ""));
+          const vid =
+            row.match_id_hint != null && row.match_id_hint !== undefined ? String(row.match_id_hint) : "—";
+          const pathEnc = encodeURIComponent(String(row.path || ""));
+          const chk = `<td class="col-check"><input type="checkbox" class="replay-row-check" data-kind="local" data-path-enc="${pathEnc}" /></td>`;
           const sz = formatDlBytes(row.size);
           const timeCol = truncateToMinute(String(row.modified || ""));
           const st = localStatusText(row);
-          const pathEnc = encodeURIComponent(String(row.path || ""));
           const uraw = String(row.user_remark || "");
           const ur = dlAttrEsc(uraw);
           const pk = row.dem_norm_key || demKeyForParseProgress(String(row.path || ""));
           const inParse = Boolean(pk && (isParseActiveForKey(pk) || isParseQueuedForKey(pk)));
-          let act = `<button type="button" class="btn-local-delete" data-local-path="${pathEnc}" style="background:#8b1e2d;">删除</button>`;
-          if (row.playback_ready) {
+          const isPlaying = Boolean(pk && pk === currentPlayingDemKey());
+          let act = `<button type="button" class="btn-replay-clear-cache" data-kind="local" data-local-path="${pathEnc}" style="background:#8b1e2d;">清除缓存</button>`;
+          if (isPlaying) {
+            act = `<button type="button" class="btn-local-play btn-replay-playing" data-local-path="${pathEnc}" disabled title="当前正在播放">播放</button>${act}`;
+          } else if (row.playback_ready) {
             act = `<button type="button" class="btn-local-play" data-local-path="${pathEnc}" style="background:#1a7f37;">播放</button>${act}`;
           } else if (inParse) {
             act = `<button type="button" class="btn-parse-cancel" data-dem-key="${dlAttrEsc(pk)}" style="background:#8a5a2b;">取消</button>${act}`;
@@ -1960,19 +2174,18 @@ HTML_TEMPLATE = """<!doctype html>
             act = `<button type="button" class="btn-local-process" data-local-path="${pathEnc}" style="background:#6b4dbf;">处理</button>${act}`;
           }
           return `<tr data-merged-idx="${gIdx}">
-            <td title="${name}"><span class="local-replay-name">${name}</span></td>
-            <td class="small-muted">${folder}</td>
-            <td>${mid}</td>
+            ${chk}
+            <td>${dlAttrEsc(vid)}</td>
             <td>${sz}</td>
             <td class="small-muted">${dlAttrEsc(timeCol)}</td>
             <td>${st}</td>
-            <td class="dl-remark-cell"><span title="${ur}">${uraw ? ur : "—"}</span> <button type="button" class="btn-secondary btn-remark-local" data-local-path="${pathEnc}" style="padding:3px 8px;font-size:11px;">编辑</button></td>
             <td class="dl-actions-cell">${act}</td>
+            <td class="dl-remark-cell"><span title="${ur}">${uraw ? ur : "—"}</span> <button type="button" class="btn-secondary btn-remark-local" data-local-path="${pathEnc}" style="padding:3px 8px;font-size:11px;">编辑</button></td>
           </tr>`;
         })
         .join("");
 
-      replayManagerList.innerHTML = `<table class="dl-table"><thead><tr><th>文件名</th><th>目录</th><th>比赛</th><th>大小</th><th>时间</th><th>状态</th><th>备注</th><th>操作</th></tr></thead><tbody>${bodyRows}</tbody></table>`;
+      replayManagerList.innerHTML = `<table class="dl-table"><thead><tr><th class="col-check"><input type="checkbox" id="replayCheckAllPage" title="本页全选" /></th><th>录像id</th><th>大小</th><th>时间</th><th>状态</th><th>操作</th><th>备注</th></tr></thead><tbody>${bodyRows}</tbody></table>`;
       renderPagerBar(replayManagerPage, merged.length, DL_PAGE_SIZE);
 
       const postCancelParse = async (btn) => {
@@ -2056,22 +2269,6 @@ HTML_TEMPLATE = """<!doctype html>
         });
       });
 
-      const postAct = async (btn, path) => {
-        const id = btn.getAttribute("data-task-id");
-        if (!id) return;
-        try {
-          const res = await fetch(`/api/downloads/${id}/${path}`, { method: "POST" });
-          const o = await res.json().catch(() => ({}));
-          if (!res.ok || o.ok === false) throw new Error(o.error || res.statusText);
-          const j = await fetchDownloadTasksRaw();
-          if (j) lastDownloadPayload = j;
-          renderDownloadTaskList();
-        } catch (e) {
-          alert(`${path} 失败：${e.message || e}`);
-        }
-      };
-      replayManagerList.querySelectorAll(".btn-dl-pause").forEach((b) => b.addEventListener("click", () => postAct(b, "pause")));
-      replayManagerList.querySelectorAll(".btn-dl-resume").forEach((b) => b.addEventListener("click", () => postAct(b, "resume")));
       replayManagerList.querySelectorAll(".btn-dl-process").forEach((btn) => {
         btn.addEventListener("click", async () => {
           const id = btn.getAttribute("data-task-id");
@@ -2174,31 +2371,10 @@ HTML_TEMPLATE = """<!doctype html>
           }
         });
       });
-      replayManagerList.querySelectorAll(".btn-local-delete").forEach((btn) => {
-        btn.addEventListener("click", async () => {
-          if (!confirm("确定删除该录像文件及其解析缓存？")) return;
-          const enc = btn.getAttribute("data-local-path");
-          if (!enc) return;
-          let pathStr = "";
-          try {
-            pathStr = decodeURIComponent(enc);
-          } catch (e) {
-            return;
-          }
-          try {
-            const res = await fetch("/api/downloads/local/delete", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ path: pathStr }),
-            });
-            const o = await res.json().catch(() => ({}));
-            if (!res.ok || o.ok === false) throw new Error(o.error || res.statusText);
-            const j = await fetchDownloadTasksRaw();
-            if (j) lastDownloadPayload = j;
-            renderDownloadTaskList();
-          } catch (e) {
-            alert(`删除失败：${e.message || e}`);
-          }
+      replayManagerList.querySelectorAll(".btn-replay-clear-cache").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const one = buildClearCacheItemFromReplayButton(btn);
+          openReplayClearCacheModal(one ? [one] : []);
         });
       });
     }
@@ -2226,6 +2402,7 @@ HTML_TEMPLATE = """<!doctype html>
 
     downloadManagerCloseBtn.addEventListener("click", () => {
       closeNewDownloadModal();
+      closeReplayClearCacheModal();
       downloadManagerModal.classList.remove("open");
       if (downloadPollTimer) {
         clearInterval(downloadPollTimer);
@@ -2234,16 +2411,36 @@ HTML_TEMPLATE = """<!doctype html>
     });
     downloadManagerModal.addEventListener("click", (e) => {
       if (e.target !== downloadManagerModal) return;
+      if (clearReplayCacheModal && clearReplayCacheModal.classList.contains("open")) {
+        closeReplayClearCacheModal();
+        return;
+      }
       if (newDownloadModal.classList.contains("open")) {
         closeNewDownloadModal();
         return;
       }
       downloadManagerCloseBtn.click();
     });
-    downloadSearchInput.addEventListener("input", () => {
-      replayManagerPage = 1;
-      renderDownloadTaskList();
-    });
+    function hasExistingReplayForMatchId(mid) {
+      const n = Number(mid);
+      if (!Number.isFinite(n) || n <= 0) return false;
+      const locals = lastDownloadPayload.local_replays || [];
+      for (const row of locals) {
+        const hint = row.match_id_hint;
+        if (hint != null && Number(hint) === n) return true;
+        const nm = String(row.name || "");
+        if (new RegExp(`_${n}\\.(?:dem|dem\\.bz2)$`, "i").test(nm)) return true;
+        if (new RegExp(`^${n}\\.dem(?:\\.bz2)?$`, "i").test(nm)) return true;
+      }
+      const tasks = lastDownloadPayload.tasks || [];
+      for (const t of tasks) {
+        if (Number(t.match_id) !== n) continue;
+        if (t.state === "cancelled") continue;
+        return true;
+      }
+      return false;
+    }
+
     function syncDownloadSettingsControls() {
       const mcVal = String(Math.max(1, Math.min(5, Number(lastDownloadPayload.max_concurrent) || 3)));
       if (maxConcurrentSelect.value !== mcVal) maxConcurrentSelect.value = mcVal;
@@ -2277,6 +2474,10 @@ HTML_TEMPLATE = """<!doctype html>
       applyDownloadSettingsPayload(o);
       return o;
     }
+    downloadSearchInput.addEventListener("input", () => {
+      replayManagerPage = 1;
+      renderDownloadTaskList();
+    });
     maxConcurrentSelect.addEventListener("change", async () => {
       const v = Math.max(1, Math.min(5, parseInt(maxConcurrentSelect.value, 10) || 3));
       maxConcurrentSelect.value = String(v);
@@ -2300,6 +2501,7 @@ HTML_TEMPLATE = """<!doctype html>
     }
     openNewDownloadModalBtn.addEventListener("click", () => {
       modalNewMatchIdInput.value = "";
+      syncDownloadSettingsControls();
       newDownloadModal.classList.add("open");
       setTimeout(() => modalNewMatchIdInput.focus(), 50);
     });
@@ -2309,14 +2511,27 @@ HTML_TEMPLATE = """<!doctype html>
       if (e.target === newDownloadModal) closeNewDownloadModal();
     });
     confirmNewDownloadBtn.addEventListener("click", async () => {
-      const raw = modalNewMatchIdInput.value.trim();
-      const mid = parseInt(raw, 10);
-      if (!Number.isFinite(mid) || mid <= 0) {
-        alert("请输入有效比赛编号");
-        return;
-      }
       confirmNewDownloadBtn.disabled = true;
       try {
+        const j0 = await fetchDownloadTasksRaw();
+        if (j0) lastDownloadPayload = j0;
+
+        const raw = modalNewMatchIdInput.value.trim();
+        if (!raw) {
+          alert("请填写录像id");
+          return;
+        }
+        const mid = parseInt(raw, 10);
+        if (!Number.isFinite(mid) || mid <= 0) {
+          alert("请输入有效录像id");
+          return;
+        }
+        if (hasExistingReplayForMatchId(mid)) {
+          alert(
+            "已存在该录像：列表中已有相同比赛编号的下载任务，或 replays 目录下已有对应 .dem 文件。"
+          );
+          return;
+        }
         const res = await fetch("/api/downloads", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -2334,26 +2549,89 @@ HTML_TEMPLATE = """<!doctype html>
       }
     });
 
-    clearCacheBtn.addEventListener("click", async () => {
-      if (!data || data.session_ready === false) return;
-      const ok = confirm("确定要删除当前录像的缓存文件吗？该操作不可撤销。");
-      if (!ok) return;
-      const ok2 = confirm("请再次确认：删除后下次将重新解析录像，可能较慢。是否继续？");
-      if (!ok2) return;
-      try {
-        const res = await fetch("/clear_cache", { method: "POST" });
-        const obj = await res.json();
-        if (obj && obj.deleted) {
-          data.cache_hit = false;
-          alert(`缓存已删除：${obj.cache_path}`);
-        } else {
-          alert(`未删除缓存（可能不存在）：${obj && obj.cache_path ? obj.cache_path : "unknown"}`);
+    if (batchProcessReplaysBtn) {
+      batchProcessReplaysBtn.addEventListener("click", async () => {
+        const items = collectReplayManagerCheckedItems();
+        if (!items.length) {
+          alert("请先勾选要处理的录像。");
+          return;
         }
-      } catch (err) {
-        alert(`清理缓存失败：${String(err)}`);
-      }
-    });
-
+        if (!confirm(`确定对选中项中尚未解析的录像入队解析？共 ${items.length} 条（已解析或已在队列中的会自动跳过）。`)) return;
+        try {
+          const res = await fetch("/api/downloads/batch/process", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ items }),
+          });
+          const o = await res.json().catch(() => ({}));
+          if (!res.ok || o.ok === false) throw new Error(o.error || res.statusText);
+          const r = o.results || [];
+          const queued = r.filter((x) => x && x.queued).length;
+          const skipped = r.filter((x) => x && x.skipped).length;
+          const failed = r.filter((x) => x && x.ok === false).length;
+          alert(`批量处理完成：新入队 ${queued} 条，跳过 ${skipped} 条，失败 ${failed} 条。`);
+          await pollDownloadTasksOnce();
+          renderDownloadTaskList();
+        } catch (e) {
+          alert(`批量处理失败：${e.message || e}`);
+        }
+      });
+    }
+    if (batchClearCacheReplaysBtn) {
+      batchClearCacheReplaysBtn.addEventListener("click", () => {
+        const items = collectReplayManagerCheckedItems();
+        if (!items.length) {
+          alert("请先勾选要清除缓存的录像。");
+          return;
+        }
+        openReplayClearCacheModal(items);
+      });
+    }
+    if (clearReplayCacheModalCloseBtn) clearReplayCacheModalCloseBtn.addEventListener("click", closeReplayClearCacheModal);
+    if (cancelClearReplayCacheBtn) cancelClearReplayCacheBtn.addEventListener("click", closeReplayClearCacheModal);
+    if (clearReplayCacheModal) {
+      clearReplayCacheModal.addEventListener("click", (e) => {
+        if (e.target === clearReplayCacheModal) closeReplayClearCacheModal();
+      });
+    }
+    if (confirmClearReplayCacheBtn) {
+      confirmClearReplayCacheBtn.addEventListener("click", async () => {
+        const items = pendingReplayCacheClearItems.slice();
+        if (!items.length) {
+          closeReplayClearCacheModal();
+          return;
+        }
+        const alsoDeleteDem = Boolean(clearReplayCacheAlsoDeleteDemCheckbox && clearReplayCacheAlsoDeleteDemCheckbox.checked);
+        confirmClearReplayCacheBtn.disabled = true;
+        try {
+          const res = await fetch("/api/downloads/batch/clear-cache", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ items, also_delete_dem: alsoDeleteDem }),
+          });
+          const o = await res.json().catch(() => ({}));
+          if (!res.ok || o.ok === false) throw new Error(o.error || res.statusText);
+          const r = o.results || [];
+          const okn = r.filter((x) => x && x.ok).length;
+          const bad = r.filter((x) => x && x.ok === false).length;
+          alert(`清除缓存完成：成功 ${okn} 条，失败 ${bad} 条。`);
+          closeReplayClearCacheModal();
+          await pollDownloadTasksOnce();
+          renderDownloadTaskList();
+          if (o.touched_current_replay) {
+            try {
+              await reloadDataFromServer();
+            } catch (err) {
+              alert(`列表已更新，但刷新当前画面失败：${err.message || err}`);
+            }
+          }
+        } catch (e) {
+          alert(`操作失败：${e.message || e}`);
+        } finally {
+          confirmClearReplayCacheBtn.disabled = false;
+        }
+      });
+    }
 
     (async () => {
       // debug+DSR-MAPDBG-01: 记录数据请求与首帧渲染耗时。
@@ -2396,9 +2674,9 @@ def parse_args() -> argparse.Namespace:
         "input_replay",
         nargs="?",
         default=None,
-        help="仅用于 --export-json / --no-server 或显式指定文件：回放路径（.dem 或 .dem.bz2）。"
-        "启动 Web 时优先 .dsr_last_replay.json；若无记录则默认选用库列表首项（replays/ 与 replay_samples/，"
-        "排序与下载管理中本机列表一致），仍仅加载缓存、不自动全量解析。",
+        help="仅用于 --export-json / --no-server 或显式指定文件：回放路径（.dem；本机库仅使用 replays/ 下 .dem）。"
+        "启动 Web 时优先 .dsr_last_replay.json；若无记录则默认选用库列表首项（replays/ 下 .dem，"
+        "排序与录像管理中本机列表一致），仍仅加载缓存、不自动全量解析。",
     )
     parser.add_argument("--host", default="127.0.0.1", help="Web 服务监听地址（默认 127.0.0.1）")
     parser.add_argument("--port", type=int, default=8765, help="Web 服务端口（默认 8765）")
@@ -2433,8 +2711,8 @@ def resolve_input_path(raw: str | None) -> Path:
     candidates = iter_default_replay_candidates()
     if not candidates:
         raise FileNotFoundError(
-            "未提供 input_replay 且在 replays/ 与 replay_samples/ 下找不到回放文件。"
-            "请用: python3 run.py <your.dem|your.dem.bz2>"
+            "未提供 input_replay 且在 replays/ 下找不到 .dem 回放文件。"
+            "请用: python3 run.py <your.dem>"
         )
     chosen = candidates[0]
     print(f"[boot] resolve_input_path：选用默认候选第一个 path={chosen}（共 {len(candidates)} 个候选）")
@@ -2590,7 +2868,7 @@ def iter_ordered_startup_replay_paths(args: argparse.Namespace, rec: tuple[Path,
 
 
 def prepare_web_gui_session(args: argparse.Namespace) -> tuple[dict[str, Any], Path, bool]:
-    """启动 Web GUI：仅加载 .replay_cache；无命中则占位并打开下载管理。
+    """启动 Web GUI：仅加载 .replay_cache；无命中则占位并打开录像管理。
 
     多个候选时按 iter_ordered_startup_replay_paths 顺序尝试，直至首个已缓存项。"""
     t_pw = time.perf_counter()
@@ -2618,7 +2896,7 @@ def prepare_web_gui_session(args: argparse.Namespace) -> tuple[dict[str, Any], P
         print(f"[info] 使用命令行指定的录像: {candidates[0]}")
     elif not candidates:
         print("[info] 无任何可尝试的录像路径（库目录为空且无记录）")
-        print("[boot] 无将预加载的录像，将进入占位会话或自动打开下载管理")
+        print("[boot] 无将预加载的录像，将进入占位会话或自动打开录像管理")
         pl = make_placeholder_gui_payload(fps, open_download_manager=True)
         print(f"[boot] prepare_web_gui_session：结束（占位）({_boot_ms(t_pw):.0f}ms)")
         return pl, replay_storage_root(), True
@@ -2653,12 +2931,12 @@ def prepare_web_gui_session(args: argparse.Namespace) -> tuple[dict[str, Any], P
                 hint = first_file.resolve()
             except OSError:
                 hint = first_file
-        print(f"[info] 候选录像均无解析缓存，请在下载管理中先「处理」。参考路径: {first_file}")
+        print(f"[info] 候选录像均无解析缓存，请在录像管理中先「处理」。参考路径: {first_file}")
     else:
         print("[info] 候选路径均非有效文件，占位")
     pl = make_placeholder_gui_payload(fps, open_download_manager=True)
     print(f"[info] 占位会话 open_dm=True dem_hint={hint}")
-    print(f"[boot] prepare_web_gui_session：结束（占位，待下载管理）({_boot_ms(t_pw):.0f}ms)")
+    print(f"[boot] prepare_web_gui_session：结束（占位，待录像管理）({_boot_ms(t_pw):.0f}ms)")
     return pl, hint, True
 
 
@@ -2794,7 +3072,7 @@ def build_gui_payload(
 
     if not allow_parse:
         raise ReplayCacheMissingError(
-            "该录像尚无解析缓存；播放与载入仅使用已解析数据。请在下载管理中点击「处理」生成缓存后再试。"
+            "该录像尚无解析缓存；播放与载入仅使用已解析数据。请在录像管理中点击「处理」生成缓存后再试。"
             f" dem={dem_path} cache={cache_path}"
         )
 
@@ -2942,28 +3220,23 @@ def build_gui_payload(
 
 
 def library_file_playback_ready(path_str: str) -> bool:
-    """本机库路径是否已有可复用的解析缓存（.dem.bz2 以解压后的 .dem 为准）。"""
+    """本机库 .dem 路径是否已有可复用的解析缓存。"""
     try:
         p = Path(str(path_str))
         if not p.is_file():
             return False
-        if p.name.lower().endswith(".dem.bz2"):
-            dem = p.parent / p.stem
-            if not dem.is_file():
-                return False
-            return cache_path_for_dem(dem).exists()
-        if p.suffix.lower() == ".dem" and not p.name.lower().endswith(".dem.bz2"):
-            return cache_path_for_dem(p).exists()
+        if p.suffix.lower() != ".dem" or p.name.lower().endswith(".dem.bz2"):
+            return False
+        return cache_path_for_dem(p).exists()
     except OSError:
         return False
-    return False
 
 
 def annotate_local_replays_with_cache(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for it in rows:
         it["playback_ready"] = library_file_playback_ready(str(it.get("path", "")))
         try:
-            dp = ensure_dem_path(Path(str(it.get("path", ""))))
+            dp = Path(str(it.get("path", ""))).expanduser().resolve()
             it["dem_norm_key"] = norm_dem_storage_key(dp)
         except OSError:
             it["dem_norm_key"] = norm_dem_storage_key(Path(str(it.get("path", ""))))
@@ -2984,7 +3257,7 @@ def enrich_download_task(task: dict[str, Any]) -> dict[str, Any]:
                 t["cache_exists"] = cache_path_for_dem(dem).exists()
                 t["playback_ready"] = t["cache_exists"]
                 t["output_size"] = int(dem.stat().st_size)
-                t["dem_norm_key"] = norm_dem_storage_key(ensure_dem_path(dem))
+                t["dem_norm_key"] = norm_dem_storage_key(dem)
             except OSError:
                 t["dem_norm_key"] = norm_dem_storage_key(dem)
     return t
@@ -3183,6 +3456,36 @@ def run_server(host: str, port: int, payload: dict[str, Any], dem_path: Path, op
             raise FileNotFoundError("录像文件不存在")
         return dem_file
 
+    def _batch_item_resolve_dem(item: dict[str, Any]) -> tuple[Path | None, str | None]:
+        k = item.get("kind")
+        if k == "local":
+            try:
+                p = _read_local_library_path({"path": item.get("path")}, "仅允许处理 replays/ 下的 .dem")
+            except ValueError as e:
+                return None, str(e)
+            if not p.is_file():
+                return None, "文件不存在"
+            return p, None
+        if k == "task":
+            tid = str(item.get("task_id", "")).strip()
+            if not tid:
+                return None, "缺少 task_id"
+            try:
+                return _read_task_dem_path(tid, only_completed=True), None
+            except ValueError as e:
+                return None, str(e)
+            except FileNotFoundError:
+                return None, "录像文件不存在"
+        return None, "条目 kind 无效"
+
+    def _dem_matches_session_dem(dem: Path) -> bool:
+        with lock:
+            cur = ctx["dem_path"]
+        try:
+            return dem.resolve() == cur.resolve()
+        except OSError:
+            return str(dem) == str(cur)
+
     def current_payload_bytes() -> bytes:
         out = dict(ctx["payload"])
         out["parse_progress"] = parse_progress_for_client()
@@ -3246,7 +3549,6 @@ def run_server(host: str, port: int, payload: dict[str, Any], dem_path: Path, op
                         "parse_progress": parse_progress_for_client(),
                         "storage_roots": {
                             "replays": str(replay_storage_root().resolve()),
-                            "replay_samples": str(legacy_replay_samples_dir().resolve()),
                         },
                     },
                 )
@@ -3290,7 +3592,7 @@ def run_server(host: str, port: int, payload: dict[str, Any], dem_path: Path, op
                 print(f"[http] POST {req_path} client={self.client_address[0]}")
                 try:
                     body = _read_json_body(self)
-                    p = _read_local_library_path(body, "仅允许载入 replays/ 或 replay_samples/ 下的录像")
+                    p = _read_local_library_path(body, "仅允许载入 replays/ 下的 .dem 录像")
                     dem_out, match_id = _switch_replay_session(p, allow_parse=False)
                     print(f"[http] local/load 成功 match_id={match_id} dem={dem_out}")
                     _send_json(self, 200, {"ok": True, "dem_path": dem_out, "match_id": match_id})
@@ -3304,38 +3606,87 @@ def run_server(host: str, port: int, payload: dict[str, Any], dem_path: Path, op
                     print(f"[http] local/load 失败: {e}")
                     _send_json(self, 502, {"ok": False, "error": str(e)})
                 return
-            if req_path == "/api/downloads/local/delete":
+            if req_path == "/api/downloads/batch/clear-cache":
                 print(f"[http] POST {req_path} client={self.client_address[0]}")
                 try:
                     body = _read_json_body(self)
-                    p = Path(str(body.get("path", ""))).expanduser()
-                    try:
-                        p = p.resolve()
-                    except OSError:
-                        _send_json(self, 400, {"ok": False, "error": "路径无效"})
-                        return
-                    if not is_replay_library_path(p):
-                        _send_json(self, 400, {"ok": False, "error": "仅允许删除 replays/ 或 replay_samples/ 下的录像"})
-                        return
-                    if not p.is_file():
-                        _send_json(self, 404, {"ok": False, "error": "文件不存在"})
-                        return
-                    delete_replay_cache(p)
-                    p.unlink()
-                    if p.name.lower().endswith(".dem.bz2"):
-                        dem_unpacked = p.parent / p.stem
-                        if dem_unpacked.is_file() and is_replay_library_path(dem_unpacked):
-                            delete_replay_cache(dem_unpacked)
-                            dem_unpacked.unlink(missing_ok=True)
-                    elif p.suffix.lower() == ".dem" and not p.name.lower().endswith(".dem.bz2"):
-                        bz2_sibling = p.parent / (p.name + ".bz2")
-                        if bz2_sibling.is_file() and is_replay_library_path(bz2_sibling):
-                            delete_replay_cache(bz2_sibling)
-                            bz2_sibling.unlink(missing_ok=True)
-                    _send_json(self, 200, {"ok": True})
-                    print(f"[http] local/delete 成功 path={p}")
+                    raw_items = body.get("items")
+                    if not isinstance(raw_items, list):
+                        raise ValueError("items 必须是数组")
+                    also_delete_dem = bool(body.get("also_delete_dem"))
+                    results: list[dict[str, Any]] = []
+                    touched_current = False
+                    for raw in raw_items:
+                        if not isinstance(raw, dict):
+                            results.append({"ok": False, "error": "条目格式错误"})
+                            continue
+                        dem, err = _batch_item_resolve_dem(raw)
+                        if err or dem is None:
+                            results.append({"ok": False, "error": err or "无法解析路径"})
+                            continue
+                        path_s = str(dem)
+                        try:
+                            delete_replay_cache(dem)
+                        except OSError as oe:
+                            results.append({"ok": False, "error": f"删除缓存失败: {oe}", "path": path_s})
+                            continue
+                        if _dem_matches_session_dem(dem):
+                            touched_current = True
+                        entry: dict[str, Any] = {"ok": True, "path": path_s, "cache_cleared": True}
+                        if also_delete_dem:
+                            k = raw.get("kind")
+                            if k == "local":
+                                purge_local_replay_dem_file(dem)
+                                entry["dem_deleted"] = True
+                            elif k == "task":
+                                tid = str(raw.get("task_id", "")).strip()
+                                try:
+                                    download_mgr.delete_task(tid)
+                                except KeyError:
+                                    results.append({"ok": False, "error": "任务不存在", "path": path_s})
+                                    continue
+                                entry["dem_deleted"] = True
+                        results.append(entry)
+                    if touched_current:
+                        with lock:
+                            ctx["payload"]["cache_hit"] = False
+                    _send_json(self, 200, {"ok": True, "results": results, "touched_current_replay": touched_current})
+                except ValueError as e:
+                    _send_json(self, 400, {"ok": False, "error": str(e)})
                 except Exception as e:
-                    print(f"[http] local/delete 失败: {e}")
+                    print(f"[http] batch/clear-cache 失败: {e}")
+                    _send_json(self, 502, {"ok": False, "error": str(e)})
+                return
+            if req_path == "/api/downloads/batch/process":
+                print(f"[http] POST {req_path} client={self.client_address[0]}")
+                try:
+                    body = _read_json_body(self)
+                    raw_items = body.get("items")
+                    if not isinstance(raw_items, list):
+                        raise ValueError("items 必须是数组")
+                    results: list[dict[str, Any]] = []
+                    for raw in raw_items:
+                        if not isinstance(raw, dict):
+                            results.append({"ok": False, "error": "条目格式错误"})
+                            continue
+                        dem, err = _batch_item_resolve_dem(raw)
+                        if err or dem is None:
+                            results.append({"ok": False, "error": err or "无法解析路径"})
+                            continue
+                        path_s = str(dem)
+                        if library_file_playback_ready(path_s):
+                            results.append({"ok": True, "skipped": True, "reason": "已有解析缓存", "path": path_s})
+                            continue
+                        out = enqueue_parse_request(dem)
+                        if out.get("duplicate"):
+                            results.append({"ok": True, "skipped": True, "reason": "已在队列或正在解析", "path": path_s})
+                        else:
+                            results.append({"ok": True, "queued": True, "path": path_s})
+                    _send_json(self, 200, {"ok": True, "results": results})
+                except ValueError as e:
+                    _send_json(self, 400, {"ok": False, "error": str(e)})
+                except Exception as e:
+                    print(f"[http] batch/process 失败: {e}")
                     _send_json(self, 502, {"ok": False, "error": str(e)})
                 return
             if req_path == "/api/downloads/parse/cancel":
@@ -3361,7 +3712,7 @@ def run_server(host: str, port: int, payload: dict[str, Any], dem_path: Path, op
                 print(f"[http] POST {req_path} client={self.client_address[0]}")
                 try:
                     body = _read_json_body(self)
-                    p = _read_local_library_path(body, "仅允许为 replays/ 或 replay_samples/ 下的录像设置备注")
+                    p = _read_local_library_path(body, "仅允许为 replays/ 下的 .dem 设置备注")
                     remark = body.get("user_remark", "")
                     if not isinstance(remark, str):
                         raise ValueError("user_remark 必须是字符串")
@@ -3380,7 +3731,7 @@ def run_server(host: str, port: int, payload: dict[str, Any], dem_path: Path, op
                 print(f"[http] POST {req_path} client={self.client_address[0]}")
                 try:
                     body = _read_json_body(self)
-                    p = _read_local_library_path(body, "仅允许处理 replays/ 或 replay_samples/ 下的录像")
+                    p = _read_local_library_path(body, "仅允许处理 replays/ 下的 .dem")
                     out = _enqueue_process_replay(p)
                     print(f"[http] local/process 入队 path={p} out={out}")
                     _send_json(self, 200, {"ok": True, **out})
@@ -3395,7 +3746,7 @@ def run_server(host: str, port: int, payload: dict[str, Any], dem_path: Path, op
                 print(f"[http] POST {req_path} client={self.client_address[0]}")
                 try:
                     body = _read_json_body(self)
-                    p = _read_local_library_path(body, "仅允许播放 replays/ 或 replay_samples/ 下的录像")
+                    p = _read_local_library_path(body, "仅允许播放 replays/ 下的 .dem")
                     dem_out, match_id = _switch_replay_session(p, allow_parse=False)
                     print(f"[http] local/play 成功 match_id={match_id} dem={dem_out}")
                     _send_json(self, 200, {"ok": True, "dem_path": dem_out, "match_id": match_id})
@@ -3533,35 +3884,6 @@ def run_server(host: str, port: int, payload: dict[str, Any], dem_path: Path, op
                         print(f"[http] 任务 load 失败 id={tid}: {e}")
                         _send_json(self, 502, {"ok": False, "error": str(e)})
                     return
-            if self.path == "/clear_cache":
-                print(f"[http] POST /clear_cache client={self.client_address[0]}")
-                with lock:
-                    dp = ctx["dem_path"]
-                    if not dp.is_file():
-                        print(f"[http] clear_cache 跳过: 当前 dem 不是有效文件 path={dp}")
-                        body = json.dumps(
-                            {"deleted": False, "cache_path": "", "reason": "无当前录像文件"},
-                            ensure_ascii=False,
-                        ).encode("utf-8")
-                    else:
-                        deleted = delete_replay_cache(dp)
-                        if deleted:
-                            ctx["payload"]["cache_hit"] = False
-                        cp = str(cache_path_for_dem(dp))
-                        print(f"[http] clear_cache 结果 deleted={bool(deleted)} dem={dp} cache_path={cp}")
-                        body = json.dumps(
-                            {
-                                "deleted": bool(deleted),
-                                "cache_path": cp,
-                            },
-                            ensure_ascii=False,
-                        ).encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-                return
             self.send_response(404)
             self.end_headers()
 
@@ -3656,6 +3978,8 @@ def main() -> None:
     t0 = time.perf_counter()
     print(f"[boot] DotaSimpleReplay 启动 pid={os.getpid()} argv={sys.argv!r}")
     args = parse_args()
+    migrate_legacy_replay_samples_to_replays()
+    extract_replays_bz2_archives()
     print(
         f"[boot] 参数解析完成 (+{_boot_ms(t0):.0f}ms) host={args.host!r} port={args.port} fps={args.fps} "
         f"export_json={args.export_json!r} no_server={args.no_server} no_open_browser={args.no_open_browser} "

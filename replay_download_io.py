@@ -17,7 +17,7 @@ REPLAY_DL_UA = "Mozilla/5.0 (compatible; DotaSimpleReplay/1.0)"
 
 
 def replay_storage_root() -> Path:
-    """新录像默认存放目录：项目根下 replays/（与旧 replay_samples/ 并存扫描）。"""
+    """录像存放目录：项目根下 replays/（仅 .dem）。"""
     return Path(__file__).resolve().parent / "replays"
 
 
@@ -28,23 +28,18 @@ def ensure_replay_storage_dir() -> Path:
 
 
 def legacy_replay_samples_dir() -> Path:
+    """旧目录名；启动时会迁移到 replays/ 并尝试删除。"""
     return Path(__file__).resolve().parent / "replay_samples"
-
-
-def replay_samples_dir() -> Path:
-    """兼容旧名：等同于 replay_storage_root()，新下载写入 replays/。"""
-    return replay_storage_root()
 
 
 def replay_library_roots() -> list[Path]:
     roots: list[Path] = []
-    for p in (replay_storage_root(), legacy_replay_samples_dir()):
-        try:
-            r = p.resolve()
-        except OSError:
-            continue
-        if r not in roots:
-            roots.append(r)
+    p = replay_storage_root()
+    try:
+        r = p.resolve()
+    except OSError:
+        return roots
+    roots.append(r)
     return roots
 
 
@@ -56,7 +51,7 @@ def is_replay_library_path(path: Path) -> bool:
     if not p.is_file():
         return False
     name = p.name.lower()
-    if not (name.endswith(".dem") or name.endswith(".dem.bz2")):
+    if not (name.endswith(".dem") and not name.endswith(".dem.bz2")):
         return False
     for root in replay_library_roots():
         try:
@@ -68,23 +63,22 @@ def is_replay_library_path(path: Path) -> bool:
 
 
 def iter_default_replay_candidates() -> list[Path]:
-    """无命令行参数时：优先 replays/，其次 replay_samples/；排除下载临时文件。"""
+    """无命令行参数时：扫描 replays/ 下 *.dem（不含 .dem.bz2）。"""
     out: list[Path] = []
     seen: set[str] = set()
-    for root in (replay_storage_root(), legacy_replay_samples_dir()):
-        if not root.is_dir():
+    root = replay_storage_root()
+    if not root.is_dir():
+        return out
+    for p in sorted(root.glob("*.dem")):
+        if not p.is_file():
             continue
-        for pat in ("*.dem", "*.dem.bz2"):
-            for p in sorted(root.glob(pat)):
-                if not p.is_file():
-                    continue
-                if p.name.startswith("_dl_"):
-                    continue
-                key = str(p.resolve())
-                if key in seen:
-                    continue
-                seen.add(key)
-                out.append(p)
+        if p.name.startswith("_dl_"):
+            continue
+        key = str(p.resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(p)
     return out
 
 
@@ -104,48 +98,102 @@ def hint_match_id_from_filename(path: Path) -> int | None:
 
 
 def list_stored_dem_files() -> list[dict[str, Any]]:
-    """列出库目录内已有录像（.dem / .dem.bz2），供下载管理 UI 展示。"""
+    """列出 replays/ 下已有录像（仅 .dem），供下载管理 UI 展示。"""
     items: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    scanned_dirs: set[Path] = set()
-    for root_base, label in (
-        (replay_storage_root(), "replays"),
-        (legacy_replay_samples_dir(), "replay_samples"),
-    ):
+    root = replay_storage_root()
+    try:
+        root = root.resolve()
+    except OSError:
+        return items
+    if not root.is_dir():
+        return items
+    for p in sorted(root.glob("*.dem")):
+        if not p.is_file():
+            continue
+        if p.name.startswith("_dl_"):
+            continue
         try:
-            root = root_base.resolve()
+            st = p.stat()
         except OSError:
             continue
-        if root in scanned_dirs or not root.is_dir():
-            continue
-        scanned_dirs.add(root)
-        for pat in ("*.dem", "*.dem.bz2"):
-            for p in sorted(root.glob(pat)):
-                if not p.is_file():
-                    continue
-                if p.name.startswith("_dl_"):
-                    continue
-                key = str(p.resolve())
-                if key in seen:
-                    continue
-                seen.add(key)
-                try:
-                    st = p.stat()
-                except OSError:
-                    continue
-                mid = hint_match_id_from_filename(p)
-                items.append(
-                    {
-                        "path": key,
-                        "name": p.name,
-                        "size": st.st_size,
-                        "modified": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(st.st_mtime)),
-                        "folder": label,
-                        "match_id_hint": mid,
-                    }
-                )
+        key = str(p.resolve())
+        mid = hint_match_id_from_filename(p)
+        items.append(
+            {
+                "path": key,
+                "name": p.name,
+                "size": st.st_size,
+                "modified": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(st.st_mtime)),
+                "folder": "replays",
+                "match_id_hint": mid,
+            }
+        )
     items.sort(key=lambda x: x.get("modified") or "", reverse=True)
     return items
+
+
+def migrate_legacy_replay_samples_to_replays() -> None:
+    """将 replay_samples/ 下录像迁入 replays/ 并删除旧目录（.dem.bz2 解压为 .dem 后删除压缩包）。"""
+    legacy = legacy_replay_samples_dir()
+    if not legacy.is_dir():
+        return
+    dest_root = ensure_replay_storage_dir()
+    for p in sorted(legacy.iterdir()):
+        if not p.is_file():
+            continue
+        if p.name.startswith("_dl_"):
+            continue
+        name_l = p.name.lower()
+        try:
+            if name_l.endswith(".dem") and not name_l.endswith(".dem.bz2"):
+                target = dest_root / p.name
+                if target.exists():
+                    continue
+                shutil.move(str(p), str(target))
+                continue
+            if name_l.endswith(".dem.bz2"):
+                dem_out = dest_root / (p.name[:-4])
+                if dem_out.exists():
+                    p.unlink(missing_ok=True)
+                    continue
+                materialize_downloaded_to_dem(p, dem_out)
+        except OSError as ex:
+            print(f"[migrate] 跳过 {p}: {ex}")
+    try:
+        legacy.rmdir()
+        print(f"[migrate] 已删除空目录 replay_samples/")
+    except OSError:
+        try:
+            shutil.rmtree(legacy, ignore_errors=False)
+            print(f"[migrate] 已删除目录 replay_samples/")
+        except OSError as ex:
+            print(f"[migrate] 未能删除 replay_samples/（可能仍有非录像文件）: {ex}")
+
+
+def extract_replays_bz2_archives() -> None:
+    """每次启动：解压 replays/ 下遗留的 .bz2（含 .dem.bz2），成功后删除压缩包。"""
+    root = replay_storage_root()
+    if not root.is_dir():
+        return
+    for p in sorted(root.glob("*.bz2")):
+        if not p.is_file() or p.name.startswith("_dl_"):
+            continue
+        name_l = p.name.lower()
+        try:
+            if name_l.endswith(".dem.bz2"):
+                dem_out = p.parent / (p.name[:-4])
+            else:
+                dem_out = p.parent / f"{p.stem}.dem"
+            if dem_out.exists():
+                p.unlink(missing_ok=True)
+                print(f"[bz2] 已存在目标，跳过解压并移除压缩包: {p.name}")
+                continue
+            materialize_downloaded_to_dem(p, dem_out)
+            print(f"[bz2] 已解压: {p.name} -> {dem_out.name}")
+        except OSError as ex:
+            print(f"[bz2] 跳过 {p.name}: {ex}")
+        except RuntimeError as ex:
+            print(f"[bz2] 跳过 {p.name}: {ex}")
 
 
 def fetch_opendota_match(match_id: int) -> dict[str, Any]:

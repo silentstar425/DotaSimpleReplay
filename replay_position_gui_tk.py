@@ -27,7 +27,7 @@ import gem
 from gem.extractors.players import PlayerExtractor
 from gem.parser import ReplayParser
 from replay_cache import cache_path_for_dem, delete_replay_cache, load_replay_cache, save_replay_cache
-from replay_download_io import iter_default_replay_candidates
+from replay_download_io import iter_default_replay_candidates, migrate_legacy_replay_samples_to_replays
 from replay_world_entities import WorldEntityCollector
 
 
@@ -88,7 +88,7 @@ def parse_args() -> argparse.Namespace:
         "input_replay",
         nargs="?",
         default=None,
-        help="回放路径（.dem 或 .dem.bz2）。不传则尝试使用 replays/ 或 replay_samples/ 下第一个回放。",
+        help="回放路径（.dem；本机库仅使用 replays/）。不传则尝试使用 replays/ 下第一个 .dem。",
     )
     parser.add_argument("--width", type=int, default=1500, help="窗口宽度（默认 1500）")
     parser.add_argument("--height", type=int, default=980, help="窗口高度（默认 980）")
@@ -103,11 +103,12 @@ def resolve_input_path(raw: str | None) -> Path:
             raise FileNotFoundError(f"输入回放不存在: {path}")
         return path
 
+    migrate_legacy_replay_samples_to_replays()
     candidates = iter_default_replay_candidates()
     if not candidates:
         raise FileNotFoundError(
-            "未提供 input_replay 且在 replays/ 与 replay_samples/ 下找不到回放文件。"
-            "请用: python3 replay_position_gui_tk.py <your.dem|your.dem.bz2>"
+            "未提供 input_replay 且在 replays/ 下找不到 .dem 回放文件。"
+            "请用: python3 replay_position_gui_tk.py <your.dem>"
         )
     return candidates[0]
 

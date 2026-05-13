@@ -12,6 +12,7 @@ from typing import Any, Callable
 import urllib.error
 import urllib.request
 
+from replay_asset_registry import purge_match, register_dem_ready, register_download_tmp
 from replay_cache import delete_replay_cache
 from replay_download_io import (
     REPLAY_DL_UA,
@@ -199,6 +200,7 @@ class DownloadTaskManager:
         th = threading.Thread(target=self._run_task, args=(tid,), name=f"dl-{tid[:8]}", daemon=True)
         task.thread = th
         th.start()
+        register_download_tmp(mid, tid, task.download_tmp)
         print(f"[dl] 已排队下载任务 id={tid} match_id={mid} display_stem={stem!r}")
         return task
 
@@ -274,6 +276,10 @@ class DownloadTaskManager:
         self._delete_task_files(t)
 
     def _delete_task_files(self, t: DownloadTask) -> None:
+        try:
+            purge_match(t.match_id)
+        except Exception as ex:
+            print(f"[dl] purge_match(match_id={t.match_id}) 失败: {ex}")
         part = t.download_tmp.parent / (t.download_tmp.name + ".part")
         for p in (part, t.download_tmp):
             if p.exists():
@@ -366,6 +372,7 @@ class DownloadTaskManager:
             materialize_downloaded_to_dem(task.download_tmp, dem_out)
             task.output_dem_path = str(dem_out.resolve())
             dem_for_auto = dem_out.resolve()
+            register_dem_ready(task.match_id, task_id, dem_out)
             task.state = "completed"
             task.phase = "done"
             task.bytes_received = task.bytes_total or task.bytes_received
