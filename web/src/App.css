@@ -331,6 +331,35 @@ select {
   font-weight: bold;
 }
 
+.replay-table-compact th,
+.replay-table-compact td {
+  padding: 6px 8px;
+}
+
+.replay-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: nowrap;
+}
+
+.btn-row {
+  padding: 4px 10px;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.btn-disabled-playing,
+.btn-disabled-playing:disabled {
+  background: #3a4d63 !important;
+  color: #b9c3cf !important;
+  cursor: not-allowed !important;
+  opacity: 0.85;
+}
+
+.replay-row-playing {
+  background: rgba(45, 108, 223, 0.08);
+}
+
 .inline-form {
   display: flex;
   align-items: center;

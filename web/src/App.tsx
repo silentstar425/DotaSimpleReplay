@@ -273,20 +273,59 @@ export default function App() {
     [data, currentTickFloat, playing]
   );
 
-  const loadReplayList = useCallback(async () => {
-    setReplaySelectError("");
-    try {
-      const res = await fetch("/replays");
-      const obj = (await res.json()) as { replays?: ReplayRecord[] };
-      if (!res.ok || !obj || !Array.isArray(obj.replays)) {
-        throw new Error(`HTTP ${res.status}`);
+  /**
+   * 轮询时不重排：用上一份缓存里出现过的 dem_path 顺序作为锚点，
+   * 新行追加到末尾，已消失的行直接丢掉，避免列表项在自动刷新时跳动。
+   * 调用方传 freezeOrder=false 则完全重置顺序（用于首次打开/手动刷新）。
+   */
+  const loadReplayList = useCallback(
+    async (opts?: { freezeOrder?: boolean }) => {
+      const freezeOrder = Boolean(opts?.freezeOrder);
+      setReplaySelectError("");
+      try {
+        const res = await fetch("/replays");
+        const obj = (await res.json()) as { replays?: ReplayRecord[] };
+        if (!res.ok || !obj || !Array.isArray(obj.replays)) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+        const next = obj.replays;
+        if (!freezeOrder) {
+          setReplayListCache(next);
+          return;
+        }
+        setReplayListCache((prev) => {
+          const byKey = new Map<string, ReplayRecord>();
+          for (const r of next) byKey.set(r.dem_path, r);
+          const ordered: ReplayRecord[] = [];
+          const seen = new Set<string>();
+          for (const r of prev) {
+            const merged = byKey.get(r.dem_path);
+            if (merged) {
+              ordered.push(merged);
+              seen.add(r.dem_path);
+            }
+          }
+          for (const r of next) {
+            if (seen.has(r.dem_path)) continue;
+            ordered.push(r);
+          }
+          return ordered;
+        });
+      } catch (err) {
+        setReplayListCache([]);
+        setReplaySelectError(`加载录像列表失败：${String(err)}`);
       }
-      setReplayListCache(obj.replays);
-    } catch (err) {
-      setReplayListCache([]);
-      setReplaySelectError(`加载录像列表失败：${String(err)}`);
-    }
-  }, []);
+    },
+    []
+  );
+
+  useEffect(() => {
+    if (!replaySelectOpen) return;
+    const id = window.setInterval(() => {
+      void loadReplayList({ freezeOrder: true });
+    }, 3000);
+    return () => window.clearInterval(id);
+  }, [replaySelectOpen, loadReplayList]);
 
   const loadReplayRecord = async (record: ReplayRecord) => {
     if (!record?.dem_path) return;
@@ -319,7 +358,7 @@ export default function App() {
       if (!res.ok || !obj?.ok) {
         throw new Error(obj?.error || `HTTP ${res.status}`);
       }
-      await loadReplayList();
+      await loadReplayList({ freezeOrder: true });
     } catch (err) {
       alert(`解析失败：${String(err)}`);
     }
@@ -387,7 +426,7 @@ export default function App() {
         throw new Error(obj?.error || `HTTP ${res.status}`);
       }
       setReplayDownloadResult(`下载成功：${obj.file_path ?? ""}`);
-      await loadReplayList();
+      await loadReplayList({ freezeOrder: true });
 
       if (autoParseAfterDownload && obj.file_path) {
         setReplayDownloadResult(`下载成功，正在解析：${obj.file_path}`);
@@ -405,7 +444,7 @@ export default function App() {
             throw new Error(parseObj?.error || `HTTP ${parseRes.status}`);
           }
           setReplayDownloadResult(`下载并解析完成：${obj.file_path}`);
-          await loadReplayList();
+          await loadReplayList({ freezeOrder: true });
         } catch (parseErr) {
           setReplayDownloadResult(
             `下载成功，但自动解析失败：${String(parseErr)}`
@@ -545,7 +584,7 @@ export default function App() {
                 style={{ background: "#3a4d63" }}
                 onClick={async () => {
                   setReplaySelectOpen(true);
-                  await loadReplayList();
+                  await loadReplayList({ freezeOrder: false });
                 }}
               >
                 录像选择
@@ -1069,7 +1108,7 @@ export default function App() {
             </button>
           </div>
           <div className="muted-line">
-            列表包含录像编号、下载时间、解析状态、解析按钮和播放按钮（仅可播放已解析录像）。
+            列表 3 秒自动刷新（保持当前顺序）；播放中项的播放按钮为禁用态。
           </div>
           {replaySelectError && (
             <div className="muted-line" style={{ color: "#ff9a9a" }}>
@@ -1077,14 +1116,13 @@ export default function App() {
             </div>
           )}
           <div className="replay-table-wrap">
-            <table className="replay-table">
+            <table className="replay-table replay-table-compact">
               <thead>
                 <tr>
                   <th>录像编号</th>
                   <th>下载时间</th>
                   <th>解析状态</th>
-                  <th>解析按钮</th>
-                  <th>播放按钮</th>
+                  <th>操作</th>
                 </tr>
               </thead>
               <tbody>
@@ -1092,26 +1130,39 @@ export default function App() {
                   const parsed = Boolean(record.parsed);
                   const sc = statusClass(parsed, record.parse_error);
                   const st = statusText(parsed, record.parse_error);
+                  const isPlaying =
+                    Boolean(data?.dem_path) &&
+                    String(data?.dem_path) === String(record.dem_path);
                   return (
-                    <tr key={`${record.dem_path}-${idx}`}>
+                    <tr
+                      key={`${record.dem_path}-${idx}`}
+                      className={isPlaying ? "replay-row-playing" : undefined}
+                    >
                       <td>{record.replay_id || `#${idx + 1}`}</td>
                       <td>{formatDownloadTime(record.downloaded_at)}</td>
                       <td>
                         <span className={sc}>{st}</span>
+                        {isPlaying && (
+                          <span className="small-muted" style={{ marginLeft: 6 }}>
+                            （播放中）
+                          </span>
+                        )}
                       </td>
-                      <td>
+                      <td className="replay-actions">
                         <button
                           type="button"
+                          className="btn-row btn-secondary"
                           disabled={parsed}
                           onClick={() => parseReplay(record)}
                         >
                           解析
                         </button>
-                      </td>
-                      <td>
                         <button
                           type="button"
-                          disabled={!parsed}
+                          className={`btn-row${
+                            isPlaying ? " btn-disabled-playing" : ""
+                          }`}
+                          disabled={!parsed || isPlaying}
                           onClick={() => {
                             if (!parsed) {
                               alert("仅可播放已解析的录像。");
@@ -1119,13 +1170,23 @@ export default function App() {
                             }
                             void loadReplayRecord(record);
                           }}
+                          title={
+                            isPlaying ? "该录像正在播放中" : undefined
+                          }
                         >
-                          播放
+                          {isPlaying ? "播放中" : "播放"}
                         </button>
                       </td>
                     </tr>
                   );
                 })}
+                {replayListCache.length === 0 && !replaySelectError && (
+                  <tr>
+                    <td colSpan={4} className="small-muted">
+                      暂无录像。点击「按ID下载录像」添加任务；本机 replays/ 下的 .dem 也会显示在此。
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>
