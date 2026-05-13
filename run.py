@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import bz2
+from concurrent.futures import ThreadPoolExecutor
 import json
 import re
 import sys
@@ -2014,7 +2015,6 @@ def run_server(host: str, port: int, payload: dict[str, Any], dem_path: Path, op
     html_bytes = HTML_TEMPLATE.encode("utf-8")
     replay_dir = Path("replay_samples").resolve()
     nonlocal_dem_path_holder = {"path": dem_path}
-    nonlocal_dem_path_holder = {"path": dem_path}
     # debug+DSR-MAPDBG-01: 服务端静态底图读取与请求日志，定位是否卡在图片传输。
     map_bg_path = Path(__file__).resolve().parent / "assets" / "maps" / "map_full.png"
     map_bg_bytes = map_bg_path.read_bytes() if map_bg_path.exists() else None
@@ -2022,6 +2022,10 @@ def run_server(host: str, port: int, payload: dict[str, Any], dem_path: Path, op
         f"[debug+DSR-MAPDBG-01] map-bg-init path={map_bg_path} "
         f"exists={map_bg_path.exists()} size={0 if map_bg_bytes is None else len(map_bg_bytes)}"
     )
+
+    # 将 DEM 解析限制在单后台线程，避免多个 HTTP 请求同时跑 build_gui_payload 争抢 GIL，
+    # 造成后入队的解析任务拖慢或明显“卡住”当前正在执行的解析。
+    parse_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="replay-parse")
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
@@ -2106,7 +2110,11 @@ def run_server(host: str, port: int, payload: dict[str, Any], dem_path: Path, op
 
                 if self.path == "/parse_replay":
                     try:
-                        build_gui_payload(dem_ready, playback_fps=int(payload.get("playback_fps", 30)))
+                        parse_executor.submit(
+                            build_gui_payload,
+                            dem_ready,
+                            int(payload.get("playback_fps", 30)),
+                        ).result()
                         _json_response(200, {"ok": True})
                     except Exception as exc:
                         _json_response(400, {"ok": False, "error": str(exc)})
@@ -2114,10 +2122,11 @@ def run_server(host: str, port: int, payload: dict[str, Any], dem_path: Path, op
 
                 if self.path == "/load_replay":
                     try:
-                        new_payload, new_dem_path = build_gui_payload(
+                        new_payload, new_dem_path = parse_executor.submit(
+                            build_gui_payload,
                             dem_ready,
-                            playback_fps=int(payload.get("playback_fps", 30)),
-                        )
+                            int(payload.get("playback_fps", 30)),
+                        ).result()
                         payload.clear()
                         payload.update(new_payload)
                         nonlocal_dem_path_holder["path"] = new_dem_path
@@ -2160,6 +2169,7 @@ def run_server(host: str, port: int, payload: dict[str, Any], dem_path: Path, op
     except KeyboardInterrupt:
         pass
     finally:
+        parse_executor.shutdown(wait=True)
         server.server_close()
 
 
