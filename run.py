@@ -849,11 +849,18 @@ HTML_TEMPLATE = """<!doctype html>
     if (replayManagerList) {
       replayManagerList.addEventListener("change", (e) => {
         const t = e.target;
-        if (!t || t.id !== "replayCheckAllPage") return;
-        const on = t.checked;
-        replayManagerList.querySelectorAll(".replay-row-check:not(:disabled)").forEach((cb) => {
-          cb.checked = on;
-        });
+        if (!t) return;
+        if (t.id === "replayCheckAllPage") {
+          const on = t.checked;
+          replayManagerList.querySelectorAll(".replay-row-check:not(:disabled)").forEach((cb) => {
+            cb.checked = on;
+          });
+          t.indeterminate = false;
+          return;
+        }
+        if (t.classList && t.classList.contains("replay-row-check")) {
+          updateReplayCheckAllHeaderState();
+        }
       });
     }
     const toggleTrailBtn = document.getElementById("toggleTrailBtn");
@@ -1513,7 +1520,7 @@ HTML_TEMPLATE = """<!doctype html>
         slider.max = "0";
         slider.value = "0";
         stopPlayback();
-        if (downloadManagerModal.classList.contains("open")) renderDownloadTaskList();
+        if (downloadManagerModal.classList.contains("open")) renderDownloadTaskList({ fullMerge: false });
         return;
       }
       titleLine.textContent = `Dota2 回放可视化 · match ${data.match_id}`;
@@ -1539,7 +1546,7 @@ HTML_TEMPLATE = """<!doctype html>
       mapView.panY = 0.0;
       clampMapViewPan();
       renderFromFloat(0);
-      if (downloadManagerModal.classList.contains("open")) renderDownloadTaskList();
+      if (downloadManagerModal.classList.contains("open")) renderDownloadTaskList({ fullMerge: false });
     };
 
     const reloadDataFromServer = async () => {
@@ -1772,6 +1779,8 @@ HTML_TEMPLATE = """<!doctype html>
     };
     let replayManagerPage = 1;
     const DL_PAGE_SIZE = 10;
+    let replayListOrderKeys = null;
+    let replayListOrderQuery = "";
 
     const dlAttrEsc = (s) =>
       String(s ?? "")
@@ -1976,6 +1985,51 @@ HTML_TEMPLATE = """<!doctype html>
       return items;
     }
 
+    function mergeReplayRowsUsingFrozenOrder(tasksF, localsF, allTasks, allLocals) {
+      const taskById = new Map((allTasks || []).map((t) => [t.id, t]));
+      const localByPath = new Map((allLocals || []).map((r) => [String(r.path || ""), r]));
+      const tfSet = new Set((tasksF || []).map((t) => t.id));
+      const lfSet = new Set((localsF || []).map((r) => String(r.path || "")));
+      const keyOfItem = (it) => (it.kind === "task" ? `t:${it.task.id}` : `l:${String(it.local.path || "")}`);
+
+      const ordered = [];
+      const seen = new Set();
+      if (replayListOrderKeys && replayListOrderKeys.length) {
+        for (const e of replayListOrderKeys) {
+          if (e.kind === "task") {
+            if (!tfSet.has(e.taskId)) continue;
+            const t = taskById.get(e.taskId);
+            if (!t) continue;
+            ordered.push({ kind: "task", task: t });
+            seen.add(`t:${e.taskId}`);
+          } else {
+            const p = String(e.path || "");
+            if (!lfSet.has(p)) continue;
+            const row = localByPath.get(p);
+            if (!row) continue;
+            ordered.push({ kind: "local", local: row });
+            seen.add(`l:${p}`);
+          }
+        }
+      }
+      const fresh = buildMergedReplayRows(tasksF, localsF);
+      for (const it of fresh) {
+        const k = keyOfItem(it);
+        if (!seen.has(k)) {
+          ordered.push(it);
+          seen.add(k);
+          if (replayListOrderKeys) {
+            replayListOrderKeys.push(
+              it.kind === "task"
+                ? { kind: "task", taskId: it.task.id }
+                : { kind: "local", path: String(it.local.path || "") }
+            );
+          }
+        }
+      }
+      return ordered;
+    }
+
     function buildClearCacheItemFromReplayButton(btn) {
       const k = btn.getAttribute("data-kind");
       if (k === "task") {
@@ -2030,6 +2084,59 @@ HTML_TEMPLATE = """<!doctype html>
       return out;
     }
 
+    function snapshotReplayManagerChecks() {
+      const taskIds = new Set();
+      const localEncs = new Set();
+      if (!replayManagerList) return { taskIds, localEncs };
+      replayManagerList.querySelectorAll(".replay-row-check:checked").forEach((cb) => {
+        const k = cb.getAttribute("data-kind");
+        if (k === "task") {
+          const tid = cb.getAttribute("data-task-id");
+          if (tid) taskIds.add(tid);
+        } else if (k === "local") {
+          const enc = cb.getAttribute("data-path-enc");
+          if (enc) localEncs.add(enc);
+        }
+      });
+      return { taskIds, localEncs };
+    }
+
+    function updateReplayCheckAllHeaderState() {
+      if (!replayManagerList) return;
+      const hdr = replayManagerList.querySelector("#replayCheckAllPage");
+      if (!hdr) return;
+      const all = replayManagerList.querySelectorAll(".replay-row-check:not(:disabled)");
+      let n = 0;
+      let c = 0;
+      all.forEach((x) => {
+        n += 1;
+        if (x.checked) c += 1;
+      });
+      if (n === 0) {
+        hdr.checked = false;
+        hdr.indeterminate = false;
+        return;
+      }
+      hdr.checked = c === n;
+      hdr.indeterminate = c > 0 && c < n;
+    }
+
+    function restoreReplayManagerChecks(snap) {
+      if (!replayManagerList || !snap) return;
+      replayManagerList.querySelectorAll(".replay-row-check").forEach((cb) => {
+        if (cb.disabled) return;
+        const k = cb.getAttribute("data-kind");
+        if (k === "task") {
+          const tid = cb.getAttribute("data-task-id");
+          if (tid && snap.taskIds.has(tid)) cb.checked = true;
+        } else if (k === "local") {
+          const enc = cb.getAttribute("data-path-enc");
+          if (enc && snap.localEncs.has(enc)) cb.checked = true;
+        }
+      });
+      updateReplayCheckAllHeaderState();
+    }
+
     function renderPagerBar(page, total, pageSize) {
       if (!replayManagerPager) return;
       if (total === 0) {
@@ -2051,18 +2158,22 @@ HTML_TEMPLATE = """<!doctype html>
           const d = parseInt(btn.getAttribute("data-pager-dir") || "0", 10);
           const tp = Math.max(1, Math.ceil(total / pageSize));
           replayManagerPage = Math.max(1, Math.min(tp, replayManagerPage + d));
-          renderDownloadTaskList();
+          renderDownloadTaskList({ fullMerge: false });
         });
       });
     }
 
-    function renderDownloadTaskList() {
+    function renderDownloadTaskList(options) {
       const roots = lastDownloadPayload.storage_roots || {};
       if (downloadStorageHint) {
         const rp = roots.replays || "";
         downloadStorageHint.textContent = rp ? `录像目录 replays：${rp}` : "";
       }
       if (!replayManagerList) return;
+
+      const checkSnap = replayManagerList.querySelector(".replay-row-check")
+        ? snapshotReplayManagerChecks()
+        : null;
 
       const allTasks = lastDownloadPayload.tasks || [];
       const allLocals = lastDownloadPayload.local_replays || [];
@@ -2076,11 +2187,29 @@ HTML_TEMPLATE = """<!doctype html>
           )
         : allTasks;
       const localsF = filterLocalsByQuery(allLocals, q);
-      const merged = buildMergedReplayRows(tasksF, localsF);
+
+      const opt = options || {};
+      let fullMerge = opt.fullMerge !== false;
+      if (!fullMerge && (!replayListOrderKeys || replayListOrderQuery !== q)) fullMerge = true;
+
+      let merged;
+      if (fullMerge) {
+        merged = buildMergedReplayRows(tasksF, localsF);
+        replayListOrderKeys = merged.map((item) =>
+          item.kind === "task"
+            ? { kind: "task", taskId: item.task.id }
+            : { kind: "local", path: String(item.local.path || "") }
+        );
+        replayListOrderQuery = q;
+      } else {
+        merged = mergeReplayRowsUsingFrozenOrder(tasksF, localsF, allTasks, allLocals);
+      }
 
       syncDownloadSettingsControls();
 
       if (allTasks.length === 0 && allLocals.length === 0) {
+        replayListOrderKeys = null;
+        replayListOrderQuery = "";
         replayManagerList.innerHTML =
           '<div class="small-muted">暂无录像。点击「新建下载」添加下载任务；本机 replays/ 下的 .dem 也会显示在此。</div>';
         if (replayManagerPager) replayManagerPager.innerHTML = "";
@@ -2088,6 +2217,8 @@ HTML_TEMPLATE = """<!doctype html>
         return;
       }
       if (merged.length === 0) {
+        replayListOrderKeys = null;
+        replayListOrderQuery = q;
         replayManagerList.innerHTML = '<div class="small-muted">无匹配录像，请调整检索关键字。</div>';
         if (replayManagerPager) replayManagerPager.innerHTML = "";
         return;
@@ -2140,7 +2271,7 @@ HTML_TEMPLATE = """<!doctype html>
             } else {
               actions = tail;
             }
-            return `<tr data-merged-idx="${gIdx}"${titleAttr}>
+            return `<tr data-merged-idx="${gIdx}" data-replay-kind="task" data-task-id="${t.id}"${titleAttr}>
               ${chk}
               <td>${dlAttrEsc(vid)}</td>
               <td>${sz}</td>
@@ -2173,7 +2304,7 @@ HTML_TEMPLATE = """<!doctype html>
           } else {
             act = `<button type="button" class="btn-local-process" data-local-path="${pathEnc}" style="background:#6b4dbf;">处理</button>${act}`;
           }
-          return `<tr data-merged-idx="${gIdx}">
+          return `<tr data-merged-idx="${gIdx}" data-replay-kind="local" data-path-enc="${pathEnc}">
             ${chk}
             <td>${dlAttrEsc(vid)}</td>
             <td>${sz}</td>
@@ -2289,6 +2420,7 @@ HTML_TEMPLATE = """<!doctype html>
         });
       });
       replayManagerList.querySelectorAll(".btn-dl-play").forEach((btn) => {
+        if (btn.disabled) return;
         btn.addEventListener("click", async () => {
           const id = btn.getAttribute("data-task-id");
           if (!id) return;
@@ -2319,6 +2451,7 @@ HTML_TEMPLATE = """<!doctype html>
         })
       );
       replayManagerList.querySelectorAll(".btn-local-play").forEach((btn) => {
+        if (btn.disabled) return;
         btn.addEventListener("click", async () => {
           const enc = btn.getAttribute("data-local-path");
           if (!enc) return;
@@ -2377,21 +2510,24 @@ HTML_TEMPLATE = """<!doctype html>
           openReplayClearCacheModal(one ? [one] : []);
         });
       });
+      if (checkSnap) restoreReplayManagerChecks(checkSnap);
     }
 
     async function pollDownloadTasksOnce() {
       const j = await fetchDownloadTasksRaw();
       if (j) {
         lastDownloadPayload = j;
-        if (downloadManagerModal.classList.contains("open")) renderDownloadTaskList();
+        if (downloadManagerModal.classList.contains("open")) renderDownloadTaskList({ fullMerge: false });
       }
     }
 
     openDownloadManagerBtn.addEventListener("click", async () => {
       replayManagerPage = 1;
+      replayListOrderKeys = null;
+      replayListOrderQuery = "";
       downloadManagerModal.classList.add("open");
       await pollDownloadTasksOnce();
-      renderDownloadTaskList();
+      if (!replayListOrderKeys) renderDownloadTaskList();
       if (downloadPollTimer) clearInterval(downloadPollTimer);
       downloadPollTimer = setInterval(pollDownloadTasksOnce, 500);
     });
@@ -2403,6 +2539,8 @@ HTML_TEMPLATE = """<!doctype html>
     downloadManagerCloseBtn.addEventListener("click", () => {
       closeNewDownloadModal();
       closeReplayClearCacheModal();
+      replayListOrderKeys = null;
+      replayListOrderQuery = "";
       downloadManagerModal.classList.remove("open");
       if (downloadPollTimer) {
         clearInterval(downloadPollTimer);
