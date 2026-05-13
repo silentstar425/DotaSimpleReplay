@@ -108,6 +108,8 @@ export default function App() {
   const [replaySelectError, setReplaySelectError] = useState("");
   const [replayIdInput, setReplayIdInput] = useState("");
   const [replayDownloadResult, setReplayDownloadResult] = useState("");
+  const [autoParseAfterDownload, setAutoParseAfterDownload] = useState(true);
+  const [downloadInFlight, setDownloadInFlight] = useState(false);
 
   const hydrateFromPayload = useCallback(
     (payload: GuiPayload, titleFromMatch: boolean) => {
@@ -343,13 +345,37 @@ export default function App() {
     }
   };
 
+  const isDuplicateMatchId = useCallback(
+    (rid: string): boolean => {
+      const ridNum = Number(rid);
+      if (!Number.isFinite(ridNum) || ridNum <= 0) return false;
+      for (const r of replayListCache) {
+        if (String(r.replay_id || "").trim() === rid) return true;
+        const fromName = r.file_name?.match(/(\d{6,})/)?.[1];
+        if (fromName && fromName === rid) return true;
+      }
+      return false;
+    },
+    [replayListCache]
+  );
+
   const downloadReplayById = async () => {
+    if (downloadInFlight) return;
     const replayId = replayIdInput.trim();
+    if (!replayId) {
+      setReplayDownloadResult("请输入录像ID。");
+      return;
+    }
     if (!/^[0-9]{6,}$/.test(replayId)) {
-      setReplayDownloadResult("请输入合法的数字录像ID。");
+      setReplayDownloadResult("请输入合法的数字录像ID（至少 6 位）。");
+      return;
+    }
+    if (isDuplicateMatchId(replayId)) {
+      setReplayDownloadResult(`本机已存在录像 ${replayId}，无需重复下载。`);
       return;
     }
     setReplayDownloadResult("正在下载，请稍候...");
+    setDownloadInFlight(true);
     try {
       const res = await fetch("/download_replay_by_id", {
         method: "POST",
@@ -362,8 +388,34 @@ export default function App() {
       }
       setReplayDownloadResult(`下载成功：${obj.file_path ?? ""}`);
       await loadReplayList();
+
+      if (autoParseAfterDownload && obj.file_path) {
+        setReplayDownloadResult(`下载成功，正在解析：${obj.file_path}`);
+        try {
+          const parseRes = await fetch("/parse_replay", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ dem_path: obj.file_path }),
+          });
+          const parseObj = (await parseRes.json()) as {
+            ok?: boolean;
+            error?: string;
+          };
+          if (!parseRes.ok || !parseObj?.ok) {
+            throw new Error(parseObj?.error || `HTTP ${parseRes.status}`);
+          }
+          setReplayDownloadResult(`下载并解析完成：${obj.file_path}`);
+          await loadReplayList();
+        } catch (parseErr) {
+          setReplayDownloadResult(
+            `下载成功，但自动解析失败：${String(parseErr)}`
+          );
+        }
+      }
     } catch (err) {
       setReplayDownloadResult(`下载失败：${String(err)}`);
+    } finally {
+      setDownloadInFlight(false);
     }
   };
 
@@ -1106,14 +1158,38 @@ export default function App() {
             <input
               id="replayIdInput"
               type="text"
+              inputMode="numeric"
               placeholder="例如：8781301871"
               value={replayIdInput}
               onChange={(e) => setReplayIdInput(e.target.value)}
+              disabled={downloadInFlight}
             />
-            <button type="button" onClick={() => void downloadReplayById()}>
-              下载
+            <button
+              type="button"
+              onClick={() => void downloadReplayById()}
+              disabled={downloadInFlight}
+            >
+              {downloadInFlight ? "下载中…" : "下载"}
             </button>
           </div>
+          <label
+            className="small-muted"
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              cursor: "pointer",
+              marginTop: 10,
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={autoParseAfterDownload}
+              onChange={(e) => setAutoParseAfterDownload(e.target.checked)}
+              disabled={downloadInFlight}
+            />
+            下载后自动解析
+          </label>
           <div className="muted-line" style={{ marginTop: 10 }}>
             {replayDownloadResult}
           </div>
