@@ -214,44 +214,6 @@ export function defaultHeroState(): HeroState {
   };
 }
 
-export function pointSegmentDistSq(
-  px: number,
-  py: number,
-  x1: number,
-  y1: number,
-  x2: number,
-  y2: number
-): number {
-  const vx = x2 - x1;
-  const vy = y2 - y1;
-  const wx = px - x1;
-  const wy = py - y1;
-  const c1 = vx * wx + vy * wy;
-  if (c1 <= 0) return (px - x1) ** 2 + (py - y1) ** 2;
-  const c2 = vx * vx + vy * vy;
-  if (c2 <= c1) return (px - x2) ** 2 + (py - y2) ** 2;
-  const t = c1 / c2;
-  const projX = x1 + t * vx;
-  const projY = y1 + t * vy;
-  return (px - projX) ** 2 + (py - projY) ** 2;
-}
-
-export function isSightBlockedByTree(
-  sx: number,
-  sy: number,
-  tx: number,
-  ty: number,
-  visionSettings: VisionSettings
-): boolean {
-  const radiusSq = visionSettings.treeRadius * visionSettings.treeRadius;
-  for (const tree of visionSettings.treeBlockers) {
-    if (pointSegmentDistSq(tree.x, tree.y, sx, sy, tx, ty) <= radiusSq) {
-      return true;
-    }
-  }
-  return false;
-}
-
 export function getVisionSourceTimelines(
   data: GuiPayload,
   visionSettings: VisionSettings
@@ -265,50 +227,23 @@ export function getVisionSourceTimelines(
   return data.player_timelines;
 }
 
-export function isVisibleByVision(
-  x: number,
-  y: number,
-  tick: number,
-  data: GuiPayload,
-  visionSettings: VisionSettings
-): boolean {
-  if (!visionSettings.enabled) return true;
-  const sources = getVisionSourceTimelines(data, visionSettings);
-  const radiusSq = visionSettings.heroVisionRadius * visionSettings.heroVisionRadius;
-  for (const source of sources) {
-    const st = stateAtTick(source, tick) as HeroState | null;
-    if (!st || st.x === null || st.y === null || st.hp <= 0) continue;
-    const death = deathInfoAtTick(source, tick);
-    if (death.is_dead) continue;
-    const dx = x - st.x;
-    const dy = y - st.y;
-    if (dx * dx + dy * dy > radiusSq) continue;
-    if (!isSightBlockedByTree(st.x, st.y, x, y, visionSettings)) return true;
-  }
-  return false;
-}
-
-export function initTreeBlockers(data: GuiPayload): { x: number; y: number }[] {
-  const trees: { x: number; y: number }[] = [];
-  const spanX = data.map_bounds.max_x - data.map_bounds.min_x;
-  const spanY = data.map_bounds.max_y - data.map_bounds.min_y;
-  const cols = 28;
-  const rows = 28;
-  for (let r = 2; r < rows - 2; r += 1) {
-    for (let c = 2; c < cols - 2; c += 1) {
-      const seed = (r * 73856093) ^ (c * 19349663);
-      if (seed % 100 > 22) continue;
-      const jx = ((seed % 7) - 3) / 7;
-      const jy = (((seed >> 3) % 7) - 3) / 7;
-      const nx = (c + 0.5 + jx * 0.3) / cols;
-      const ny = (r + 0.5 + jy * 0.3) / rows;
-      trees.push({
-        x: data.map_bounds.min_x + nx * spanX,
-        y: data.map_bounds.min_y + ny * spanY,
-      });
-    }
-  }
-  return trees;
+/**
+ * 将世界坐标的圆形视野半径换算为画布像素下的椭圆半径。
+ * 由于 map_bounds 在 X/Y 方向上不一定等比，世界圆映射到画布上是椭圆。
+ */
+export function heroVisionEllipseRadiiPx(
+  wx: number,
+  wy: number,
+  worldRadius: number,
+  bounds: GuiPayload["map_bounds"],
+  canvas: HTMLCanvasElement
+): { cx: number; cy: number; rx: number; ry: number } {
+  const [cx, cy] = mapToCanvas(wx, wy, bounds, canvas);
+  const [cxRx, cyRx] = mapToCanvas(wx + worldRadius, wy, bounds, canvas);
+  const [cxRy, cyRy] = mapToCanvas(wx, wy + worldRadius, bounds, canvas);
+  const rx = Math.hypot(cxRx - cx, cyRx - cy);
+  const ry = Math.hypot(cxRy - cx, cyRy - cy);
+  return { cx, cy, rx, ry };
 }
 
 export function getMapCropRect(img: HTMLImageElement): {

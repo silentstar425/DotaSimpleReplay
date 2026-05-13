@@ -1,4 +1,10 @@
-import type { GuiPayload, HeatmapSettings, HeroTrailSettings, MapViewState, VisionSettings } from "../types/replay";
+import type {
+  GuiPayload,
+  HeatmapSettings,
+  HeroTrailSettings,
+  MapViewState,
+  VisionSettings,
+} from "../types/replay";
 import {
   applyMapViewTransform,
   computeRecentHeroPoints,
@@ -6,7 +12,8 @@ import {
   drawEntityGlyph,
   entityShortName,
   getMapCropRect,
-  isVisibleByVision,
+  getVisionSourceTimelines,
+  heroVisionEllipseRadiiPx,
   mapFramePad,
   mapToCanvas,
   resizeCanvasToMapAspect,
@@ -18,13 +25,11 @@ export function renderWorldEntities(
   ctx: CanvasRenderingContext2D,
   tick: number,
   data: GuiPayload,
-  canvas: HTMLCanvasElement,
-  visionSettings: VisionSettings
+  canvas: HTMLCanvasElement
 ): void {
   for (const timeline of data.entity_timelines || []) {
     const st = stateAtTick(timeline, tick);
     if (!st || st.x === null || st.y === null || !st.active) continue;
-    if (!isVisibleByVision(st.x, st.y, tick, data, visionSettings)) continue;
     const [cx, cy] = mapToCanvas(st.x, st.y, data.map_bounds, canvas);
     drawEntityGlyph(ctx, cx, cy, timeline);
 
@@ -47,8 +52,7 @@ function renderHeroTrails(
   tick: number,
   data: GuiPayload,
   canvas: HTMLCanvasElement,
-  settings: HeroTrailSettings,
-  visionSettings: VisionSettings
+  settings: HeroTrailSettings
 ): void {
   if (!settings.enabled) return;
   const durationTicks = Math.max(1, Math.round(settings.durationSec * data.tick_rate));
@@ -62,7 +66,6 @@ function renderHeroTrails(
       data.tick_rate
     );
     for (const pt of pts) {
-      if (!isVisibleByVision(pt.x, pt.y, tick, data, visionSettings)) continue;
       const [cx, cy] = mapToCanvas(pt.x, pt.y, data.map_bounds, canvas);
       let alpha = 0.85;
       if (settings.fadeOut) {
@@ -86,8 +89,7 @@ function renderHeroHeatmap(
   tick: number,
   data: GuiPayload,
   canvas: HTMLCanvasElement,
-  heatmapSettings: HeatmapSettings,
-  visionSettings: VisionSettings
+  heatmapSettings: HeatmapSettings
 ): void {
   if (!heatmapSettings.enabled) return;
   const intervalTicks = Math.max(1, Math.round(heatmapSettings.intervalSec * data.tick_rate));
@@ -100,7 +102,6 @@ function renderHeroHeatmap(
       data.tick_rate
     );
     for (const pt of pts) {
-      if (!isVisibleByVision(pt.x, pt.y, tick, data, visionSettings)) continue;
       const [cx, cy] = mapToCanvas(pt.x, pt.y, data.map_bounds, canvas);
       ctx.save();
       ctx.globalAlpha = Math.max(0.01, Math.min(1, heatmapSettings.opacity));
@@ -111,6 +112,84 @@ function renderHeroHeatmap(
       ctx.restore();
     }
   }
+}
+
+/**
+ * 仅承载迷雾 alpha 的离屏画布。
+ *
+ * 直接在主画布上用 destination-out 会把地图一起抠成透明洞；
+ * 改为在离屏画布上画雾再 drawImage 叠回，可以保留地图底色。
+ */
+let fogScratchCanvas: HTMLCanvasElement | null = null;
+
+function renderVisionFogOfWar(
+  ctx: CanvasRenderingContext2D,
+  tick: number,
+  data: GuiPayload,
+  canvas: HTMLCanvasElement,
+  visionSettings: VisionSettings,
+  mapView: MapViewState
+): void {
+  if (!visionSettings.enabled) return;
+  const mx0 = mapFramePad;
+  const my0 = mapFramePad;
+  const mw = Math.max(0, canvas.width - 2 * mapFramePad);
+  const mh = Math.max(0, canvas.height - 2 * mapFramePad);
+  if (mw <= 0 || mh <= 0) return;
+
+  if (
+    !fogScratchCanvas ||
+    fogScratchCanvas.width !== canvas.width ||
+    fogScratchCanvas.height !== canvas.height
+  ) {
+    fogScratchCanvas = document.createElement("canvas");
+    fogScratchCanvas.width = canvas.width;
+    fogScratchCanvas.height = canvas.height;
+  }
+  const fctx = fogScratchCanvas.getContext("2d");
+  if (!fctx) return;
+
+  fctx.setTransform(1, 0, 0, 1, 0, 0);
+  fctx.clearRect(0, 0, canvas.width, canvas.height);
+  fctx.globalAlpha = 1;
+  fctx.globalCompositeOperation = "source-over";
+  fctx.save();
+  applyMapViewTransform(fctx, canvas, mapView);
+
+  fctx.beginPath();
+  fctx.rect(mx0, my0, mw, mh);
+  fctx.clip();
+
+  const fogA = Math.max(0, Math.min(1, visionSettings.fogOpacity));
+  fctx.fillStyle = `rgba(0, 0, 0, ${fogA})`;
+  fctx.fillRect(mx0, my0, mw, mh);
+
+  fctx.globalCompositeOperation = "destination-out";
+  fctx.fillStyle = "#ffffff";
+  const sources = getVisionSourceTimelines(data, visionSettings);
+  for (const source of sources) {
+    const st = stateAtTick(source, tick);
+    if (!st || st.x === null || st.y === null || st.hp <= 0) continue;
+    if (deathInfoAtTick(source, tick).is_dead) continue;
+    const { cx, cy, rx, ry } = heroVisionEllipseRadiiPx(
+      st.x,
+      st.y,
+      visionSettings.heroVisionRadius,
+      data.map_bounds,
+      canvas
+    );
+    fctx.beginPath();
+    fctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+    fctx.fill();
+  }
+  fctx.restore();
+
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalCompositeOperation = "source-over";
+  ctx.globalAlpha = 1;
+  ctx.drawImage(fogScratchCanvas, 0, 0);
+  ctx.restore();
 }
 
 export interface DrawMapParams {
@@ -172,24 +251,16 @@ export function drawMapCanvas(p: DrawMapParams): void {
     canvas.width - 2 * mapFramePad,
     canvas.height - 2 * mapFramePad
   );
-  ctx.fillStyle = "#ccc";
-  ctx.font = "14px Arial";
-  ctx.fillText(
-    mapBackgroundLoaded ? "地图（底图 + 归一化坐标）" : "地图（归一化坐标）",
-    mapFramePad + 10,
-    mapFramePad + 16
-  );
 
-  renderWorldEntities(ctx, tick, data, canvas, visionSettings);
-  renderHeroHeatmap(ctx, tick, data, canvas, heatmapSettings, visionSettings);
-  renderHeroTrails(ctx, tick, data, canvas, heroTrailSettings, visionSettings);
+  renderWorldEntities(ctx, tick, data, canvas);
+  renderHeroHeatmap(ctx, tick, data, canvas, heatmapSettings);
+  renderHeroTrails(ctx, tick, data, canvas, heroTrailSettings);
 
   for (const timeline of data.player_timelines) {
     const st = stateAtTick(timeline, tick);
     if (!st || st.x === null || st.y === null) continue;
     const death = deathInfoAtTick(timeline, tick);
     if (death.is_dead || st.hp <= 0) continue;
-    if (!isVisibleByVision(st.x, st.y, tick, data, visionSettings)) continue;
 
     const [cx, cy] = mapToCanvas(st.x, st.y, data.map_bounds, canvas);
     ctx.beginPath();
@@ -202,5 +273,8 @@ export function drawMapCanvas(p: DrawMapParams): void {
     ctx.font = "12px Arial";
     ctx.fillText(shortHeroName(timeline.hero_name), cx + 9, cy - 9);
   }
+
+  renderVisionFogOfWar(ctx, tick, data, canvas, visionSettings, mapView);
+
   ctx.restore();
 }

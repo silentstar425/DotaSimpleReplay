@@ -91,8 +91,7 @@ export interface VisionSettings {
   enabled: boolean;
   mode: "both" | "team1" | "team2";
   heroVisionRadius: number;
-  treeRadius: number;
-  treeBlockers: { x: number; y: number }[];
+  fogOpacity: number;
   team1: number;
   team2: number;
 }

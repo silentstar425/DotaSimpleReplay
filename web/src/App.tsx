@@ -6,7 +6,6 @@ import {
   defaultHeroState,
   formatGameTime,
   heroAvatarText,
-  initTreeBlockers,
   killsAtTick,
   shortHeroName,
   stateAtTick,
@@ -83,8 +82,7 @@ export default function App() {
     enabled: false,
     mode: "both",
     heroVisionRadius: 1600,
-    treeRadius: 70,
-    treeBlockers: [],
+    fogOpacity: 0.42,
     team1: 2,
     team2: 3,
   }));
@@ -128,7 +126,6 @@ export default function App() {
         mode: "both",
         team1: teams[0] ?? 2,
         team2: teams[1] ?? teams[0] ?? 3,
-        treeBlockers: initTreeBlockers(payload),
       }));
       const heroSet = new Set(payload.player_timelines.map((t) => t.hero_name));
       setHeroTrailSettings((h) => ({ ...h, selectedHeroes: heroSet }));
