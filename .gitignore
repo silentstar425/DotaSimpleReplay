@@ -2,7 +2,9 @@
 __pycache__/
 *.pyc
 *.dem
+replays/
 .replay_cache/
 .dsr_last_replay.json
 .dsr_download_prefs.json
 .dsr_user_remarks.json
+.dsr_replay_assets.json
